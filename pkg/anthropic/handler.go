@@ -516,51 +516,89 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 	body := TranslateAnthropicRequest(req, store.GetAccountDefaultModel(r), systemDefault)
 	logRequestDetails(r, "translated native anthropic request (stream)", body)
 
-	// Commit SSE headers early so we can send heartbeat comment lines while
-	// waiting for the upstream to respond (TTFB can be 10–30s for reasoning
-	// models). SSE comment lines (": ...") are ignored by all compliant clients.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(200)
 
-	stopHeartbeat := make(chan struct{})
-	heartbeatDone := make(chan struct{})
+	// Send an immediate keepalive so the client knows the connection is alive
+	// right away, before we even hit the upstream.
+	w.Write([]byte(": keepalive\n\n")) //nolint:errcheck
+	flusher.Flush()
+
+	// Background heartbeat: 1-second interval to prevent client timeout during
+	// round-1 collection, web search execution, and round-2 connection.
+	// SSE comment lines (": ...") are ignored by the Anthropic SDK.
+	stopHB := make(chan struct{})
+	hbDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
-		defer close(heartbeatDone)
+		defer close(hbDone)
 		for {
 			select {
-			case <-stopHeartbeat:
+			case <-stopHB:
 				return
 			case <-ticker.C:
-				if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
-					return
-				}
+				w.Write([]byte(": keepalive\n\n")) //nolint:errcheck
 				flusher.Flush()
 			}
 		}
 	}()
 
 	resp, err := h.connectNativeAnthropicStreamWithRetry(r, body, client)
-	close(stopHeartbeat)
-	<-heartbeatDone
 	if err != nil {
+		close(stopHB)
+		<-hbDone
 		reqLog(r).Error("native anthropic stream failed after retries", "error", err)
 		writeStreamError(w, flusher, err.Error())
 		return
 	}
-	defer resp.Body.Close()
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// Collect round-1 while heartbeat keeps the client alive.
+	round1, collectErr := collectNativeAnthropicStream(resp.Body)
+	resp.Body.Close()
+
+	if collectErr == nil && round1.StopReason == "tool_use" {
+		searchCalls := extractWebSearchCalls(round1.Content)
+		if len(searchCalls) > 0 {
+			reqLog(r).Info("web_search interceptor: intercepting tool_use", "calls", len(searchCalls))
+			// Heartbeat is still running during search + round-2 connect.
+			toolResults := executeWebSearchCalls(searchCalls, client)
+			body2 := appendWebSearchResults(body, round1.Content, toolResults)
+			resp2, err2 := h.connectNativeAnthropicStreamWithRetry(r, body2, client)
+			close(stopHB)
+			<-hbDone
+			if err2 != nil {
+				reqLog(r).Error("web_search interceptor: round 2 failed", "error", err2)
+				writeStreamError(w, flusher, err2.Error())
+				return
+			}
+			reqLog(r).Info("web_search interceptor: piping round 2 response")
+			// Fully pipe round-2: client gets a complete self-consistent SSE stream
+			// with the upstream's own message_start (correct id + usage).
+			h.pipeNativeAnthropicStream(w, r, resp2, flusher)
+			return
+		}
+	}
+
+	close(stopHB)
+	<-hbDone
+
+	if collectErr != nil {
+		reqLog(r).Error("native anthropic stream collect error", "error", collectErr)
+		writeStreamError(w, flusher, "读取上游流式响应失败: "+collectErr.Error())
+		return
+	}
+
+	// Transparent pass-through: replay buffered round-1 lines to the client.
 	var inTk, outTk int
-	pendingEvent := ""
+	inTk, outTk = round1.InputTk, round1.OutputTk
 	sawTerminal := false
-	for scanner.Scan() {
-		payload := unwrapNativeAnthropicSSE(scanner.Text())
+	pendingEvent := ""
+	for _, line := range round1.RawLines {
+		payload := unwrapNativeAnthropicSSE(line)
 		if payload == "" {
 			continue
 		}
@@ -569,24 +607,90 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 			continue
 		}
 		if strings.HasPrefix(payload, "data: ") {
-			payload = strings.TrimSpace(strings.TrimPrefix(payload, "data: "))
+			raw := strings.TrimSpace(strings.TrimPrefix(payload, "data: "))
+			if raw == "[DONE]" {
+				fmt.Fprintln(w, "data: [DONE]")
+				fmt.Fprintln(w)
+				sawTerminal = true
+				flusher.Flush()
+				pendingEvent = ""
+				continue
+			}
+			if raw != "" && strings.HasPrefix(raw, "{") {
+				eventName := pendingEvent
+				if eventName == "" {
+					eventName = nativeAnthropicEventType(raw)
+				}
+				if eventName == "message_stop" || eventName == "error" {
+					sawTerminal = true
+				}
+				if eventName != "" {
+					fmt.Fprintf(w, "event: %s\n", eventName)
+				}
+				fmt.Fprintf(w, "data: %s\n\n", raw)
+				flusher.Flush()
+				pendingEvent = ""
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", raw)
+			flusher.Flush()
 		}
-		if payload == "" {
+		pendingEvent = ""
+	}
+	if !sawTerminal {
+		reqLog(r).Warn("native anthropic stream closed before message_stop (premature upstream close)")
+		writeStreamError(w, flusher, "上游在返回结束标记前断开了流式响应，本次回复可能不完整，请重试。")
+	}
+	if inTk > 0 || outTk > 0 {
+		store.SetTokenUsage(r, inTk, outTk)
+	}
+}
+
+// pipeNativeAnthropicStream fully pipes an upstream SSE response to the client.
+// Used for the second round of the web_search agentic loop. All events including
+// message_start are forwarded unchanged so the client receives a complete,
+// self-consistent Anthropic SSE stream with correct IDs and usage fields.
+//
+// The upstream wraps every line with an extra "data: " prefix:
+//   data: event: content_block_start
+//   data: data: {"type":"content_block_start",...}
+// We strip the outer "data: " then handle the inner "event: " / "data: " normally.
+func (h *Handler) pipeNativeAnthropicStream(w http.ResponseWriter, r *http.Request, resp *http.Response, flusher http.Flusher) {
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var inTk, outTk int
+	pendingEvent := ""
+	sawTerminal := false
+	for scanner.Scan() {
+		raw := scanner.Text()
+		// Strip ALL leading "data: " prefixes (upstream double-wraps each line).
+		line := raw
+		for strings.HasPrefix(line, "data: ") {
+			line = strings.TrimPrefix(line, "data: ")
+		}
+		line = strings.TrimSpace(line)
+
+		if line == "" {
 			continue
 		}
-		if payload == "[DONE]" {
+		if strings.HasPrefix(line, "event: ") {
+			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+			continue
+		}
+		if line == "[DONE]" {
 			fmt.Fprintln(w, "data: [DONE]")
 			fmt.Fprintln(w)
 			flusher.Flush()
 			sawTerminal = true
 			continue
 		}
-		if !strings.HasPrefix(payload, "{") {
+		if !strings.HasPrefix(line, "{") {
 			continue
 		}
 		eventName := pendingEvent
 		if eventName == "" {
-			eventName = nativeAnthropicEventType(payload)
+			eventName = nativeAnthropicEventType(line)
 		}
 		if eventName == "message_stop" || eventName == "error" {
 			sawTerminal = true
@@ -594,24 +698,23 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 		if eventName != "" {
 			fmt.Fprintf(w, "event: %s\n", eventName)
 		}
-		fmt.Fprintf(w, "data: %s\n\n", payload)
-		updateNativeAnthropicUsage(payload, &inTk, &outTk)
+		fmt.Fprintf(w, "data: %s\n\n", line)
+		updateNativeAnthropicUsage(line, &inTk, &outTk)
 		pendingEvent = ""
 		flusher.Flush()
 	}
-	// Surface a premature upstream close (no message_stop/[DONE]) as an error
-	// rather than letting the client hang or treat it as done (issue #2).
 	if !sawTerminal {
 		if err := scanner.Err(); err != nil {
-			reqLog(r).Error("native anthropic stream ended abnormally before message_stop", "error", err)
+			reqLog(r).Error("web_search round2 stream ended abnormally", "error", err)
 			writeStreamError(w, flusher, "读取上游流式响应失败，本次回复不完整，请重试。原始错误: "+err.Error())
 		} else {
-			reqLog(r).Warn("native anthropic stream closed before message_stop (premature upstream close)")
+			reqLog(r).Warn("web_search round2 stream closed before message_stop")
 			writeStreamError(w, flusher, "上游在返回结束标记前断开了流式响应，本次回复可能不完整，请重试。")
 		}
 	} else if err := scanner.Err(); err != nil {
-		reqLog(r).Error("native anthropic stream scanner error", "error", err)
+		reqLog(r).Error("web_search round2 stream scanner error", "error", err)
 	}
+	reqLog(r).Info("pipe round2 done", "sawTerminal", sawTerminal)
 	if inTk > 0 || outTk > 0 {
 		store.SetTokenUsage(r, inTk, outTk)
 	}
@@ -627,104 +730,80 @@ func (h *Handler) handleNativeAnthropicNonStream(w http.ResponseWriter, r *http.
 		writeAnthropicError(w, 500, err.Error())
 		return
 	}
-	defer resp.Body.Close()
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	content := []ContentBlock{}
-	var current *ContentBlock
-	stopReason := "end_turn"
-	var inTk, outTk int
-
-	for scanner.Scan() {
-		payload := unwrapNativeAnthropicSSE(scanner.Text())
-		if payload == "" || strings.HasPrefix(payload, "event: ") {
-			continue
-		}
-		if strings.HasPrefix(payload, "data: ") {
-			payload = strings.TrimSpace(strings.TrimPrefix(payload, "data: "))
-		}
-		if payload == "" || payload == "[DONE]" || !strings.HasPrefix(payload, "{") {
-			continue
-		}
-		if isUpstreamError(payload) {
-			writeAnthropicError(w, 500, payload)
-			return
-		}
-		updateNativeAnthropicUsage(payload, &inTk, &outTk)
-
-		var event struct {
-			Type         string          `json:"type"`
-			ContentBlock ContentBlock    `json:"content_block"`
-			Delta        json.RawMessage `json:"delta"`
-		}
-		if err := json.Unmarshal([]byte(payload), &event); err != nil {
-			continue
-		}
-		switch event.Type {
-		case "content_block_start":
-			block := event.ContentBlock
-			current = &block
-		case "content_block_delta":
-			if current == nil {
-				block := ContentBlock{Type: "text"}
-				current = &block
-			}
-			var delta struct {
-				Type        string `json:"type"`
-				Text        string `json:"text"`
-				PartialJSON string `json:"partial_json"`
-			}
-			if err := json.Unmarshal(event.Delta, &delta); err != nil {
-				continue
-			}
-			switch delta.Type {
-			case "text_delta":
-				current.Type = "text"
-				current.Text += delta.Text
-			case "input_json_delta":
-				if current.Input == nil {
-					current.Input = map[string]interface{}{}
-				}
-				if delta.PartialJSON != "" {
-					var input interface{}
-					if err := json.Unmarshal([]byte(delta.PartialJSON), &input); err == nil {
-						current.Input = input
-					}
-				}
-			}
-		case "content_block_stop":
-			if current != nil {
-				content = append(content, *current)
-				current = nil
-			}
-		case "message_delta":
-			var delta struct {
-				StopReason string `json:"stop_reason"`
-			}
-			var wrapper struct {
-				Delta deltaStop `json:"delta"`
-			}
-			if err := json.Unmarshal([]byte(payload), &wrapper); err == nil && wrapper.Delta.StopReason != "" {
-				stopReason = wrapper.Delta.StopReason
-			} else if err := json.Unmarshal(event.Delta, &delta); err == nil && delta.StopReason != "" {
-				stopReason = delta.StopReason
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		reqLog(r).Error("native anthropic non-stream scanner error", "error", err)
-		writeAnthropicError(w, 500, err.Error())
+	// --- Round 1: collect the full upstream response ---
+	round1, collectErr := collectNativeAnthropicStream(resp.Body)
+	resp.Body.Close()
+	if collectErr != nil {
+		reqLog(r).Error("native anthropic non-stream collect error", "error", collectErr)
+		writeAnthropicError(w, 500, "读取上游响应失败: "+collectErr.Error())
 		return
 	}
-	if current != nil {
-		content = append(content, *current)
+
+	// Check for upstream error embedded in round1 raw lines
+	for _, line := range round1.RawLines {
+		p := unwrapNativeAnthropicSSE(line)
+		if strings.HasPrefix(p, "data: ") {
+			p = strings.TrimSpace(strings.TrimPrefix(p, "data: "))
+		}
+		if p != "" && p != "[DONE]" && strings.HasPrefix(p, "{") && isUpstreamError(p) {
+			writeAnthropicError(w, 500, p)
+			return
+		}
 	}
+
+	// --- Web search interception ---
+	if round1.StopReason == "tool_use" {
+		searchCalls := extractWebSearchCalls(round1.Content)
+		if len(searchCalls) > 0 {
+			reqLog(r).Info("web_search interceptor (non-stream): intercepting tool_use", "calls", len(searchCalls))
+			toolResults := executeWebSearchCalls(searchCalls, client)
+			body2 := appendWebSearchResults(body, round1.Content, toolResults)
+
+			resp2, err2 := h.connectNativeAnthropicStreamWithRetry(r, body2, client)
+			if err2 != nil {
+				reqLog(r).Error("web_search interceptor (non-stream): round 2 failed", "error", err2)
+				writeAnthropicError(w, 500, err2.Error())
+				return
+			}
+			round2, collectErr2 := collectNativeAnthropicStream(resp2.Body)
+			resp2.Body.Close()
+			if collectErr2 != nil {
+				reqLog(r).Error("web_search interceptor (non-stream): collect round 2 error", "error", collectErr2)
+				writeAnthropicError(w, 500, "读取上游响应失败: "+collectErr2.Error())
+				return
+			}
+			content := round2.Content
+			if len(content) == 0 {
+				content = []ContentBlock{{Type: "text", Text: ""}}
+			}
+			stopReason := round2.StopReason
+			inTk := round1.InputTk + round2.InputTk
+			outTk := round1.OutputTk + round2.OutputTk
+			if inTk > 0 || outTk > 0 {
+				store.SetTokenUsage(r, inTk, outTk)
+			}
+			writeAnthropicJSON(w, 200, &MessageResponse{
+				ID:         NewMessageID(),
+				Type:       "message",
+				Role:       "assistant",
+				Content:    content,
+				Model:      req.Model,
+				StopReason: &stopReason,
+				Usage:      Usage{InputTokens: inTk, OutputTokens: outTk},
+			})
+			return
+		}
+	}
+
+	// --- Normal path: return round1 result directly ---
+	content := round1.Content
 	if len(content) == 0 {
 		content = []ContentBlock{{Type: "text", Text: ""}}
 	}
-	if inTk > 0 || outTk > 0 {
-		store.SetTokenUsage(r, inTk, outTk)
+	stopReason := round1.StopReason
+	if round1.InputTk > 0 || round1.OutputTk > 0 {
+		store.SetTokenUsage(r, round1.InputTk, round1.OutputTk)
 	}
 	writeAnthropicJSON(w, 200, &MessageResponse{
 		ID:         NewMessageID(),
@@ -733,10 +812,7 @@ func (h *Handler) handleNativeAnthropicNonStream(w http.ResponseWriter, r *http.
 		Content:    content,
 		Model:      req.Model,
 		StopReason: &stopReason,
-		Usage: Usage{
-			InputTokens:  inTk,
-			OutputTokens: outTk,
-		},
+		Usage:      Usage{InputTokens: round1.InputTk, OutputTokens: round1.OutputTk},
 	})
 }
 

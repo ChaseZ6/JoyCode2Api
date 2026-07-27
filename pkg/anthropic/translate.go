@@ -32,7 +32,14 @@ func TranslateRequest(req *MessageRequest, accountDefault string, systemDefault 
 		body["stop"] = req.StopSequences
 	}
 	if len(req.Tools) > 0 {
-		body["tools"] = convertToolsToOpenAI(req.Tools)
+		if hasBuiltinTools(req.Tools) {
+			// When the request includes Anthropic built-in tools (e.g. web_search_20250305)
+			// we cannot convert them to OpenAI function format.  Pass the tools as-is in
+			// Anthropic format; the upstream must support this layout.
+			body["tools"] = req.Tools
+		} else {
+			body["tools"] = convertToolsToOpenAI(req.Tools)
+		}
 	}
 	if len(req.ToolChoice) > 0 {
 		if tc := convertToolChoice(req.ToolChoice); tc != nil {
@@ -60,7 +67,7 @@ func TranslateAnthropicRequest(req *MessageRequest, accountDefault string, syste
 		body["stop_sequences"] = req.StopSequences
 	}
 	if len(req.Tools) > 0 {
-		body["tools"] = req.Tools
+		body["tools"] = normalizeToolsForNativeAnthropic(req.Tools)
 	}
 	if len(req.ToolChoice) > 0 {
 		body["tool_choice"] = json.RawMessage(req.ToolChoice)
@@ -106,10 +113,94 @@ func resolveNativeAnthropicModel(model string, accountDefault string, systemDefa
 	return resolved
 }
 
+// isBuiltinTool reports whether t is an Anthropic built-in tool (e.g.
+// web_search_20250305, computer_20241022).  Built-in tools carry a non-empty
+// Type field and have no InputSchema; they cannot be represented in the OpenAI
+// function-calling format and must be handled separately.
+func isBuiltinTool(t Tool) bool {
+	return t.Type != "" && len(t.InputSchema) == 0
+}
+
+// hasBuiltinTools reports whether any tool in the slice is a built-in tool.
+func hasBuiltinTools(tools []Tool) bool {
+	for _, t := range tools {
+		if isBuiltinTool(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeToolsForNativeAnthropic prepares tools for JoyCode's native Anthropic
+// endpoint. JoyCode does not support Anthropic built-in tool types such as
+// "web_search_20250305"; it only accepts "custom" and a few internal types.
+// The upstream validator is strict (Pydantic discriminated union) and rejects
+// any extra fields, so we hand-build each tool map with only the known-safe
+// fields instead of serialising the Tool struct directly.
+func normalizeToolsForNativeAnthropic(tools []Tool) []map[string]interface{} {
+	// Types natively supported by the JoyCode Anthropic endpoint.
+	supportedTypes := map[string]bool{
+		"bash_20250124":                   true,
+		"custom":                          true,
+		"memory_20250818":                 true,
+		"text_editor_20250124":            true,
+		"text_editor_20250429":            true,
+		"text_editor_20250728":            true,
+		"tool_search_tool_bm25":           true,
+		"tool_search_tool_bm25_20251119":  true,
+		"tool_search_tool_regex":          true,
+		"tool_search_tool_regex_20251119": true,
+	}
+	emptySchema := json.RawMessage(`{"type":"object","properties":{}}`)
+	webSearchSchema := json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"The search query"}},"required":["query"]}`)
+	out := make([]map[string]interface{}, 0, len(tools))
+	for _, t := range tools {
+		toolType := t.Type
+		if toolType == "" {
+			toolType = "custom"
+		} else if !supportedTypes[toolType] {
+			// Unsupported built-in type (e.g. web_search_20250305): downgrade to
+			// "custom" so the upstream validator accepts it.
+			toolType = "custom"
+		}
+
+		schema := t.InputSchema
+		if len(schema) == 0 {
+			// For web_search, provide the full schema so the model knows to pass a query.
+			if t.Name == "web_search" {
+				schema = webSearchSchema
+			} else {
+				schema = emptySchema
+			}
+		}
+
+		// Build the minimal field set accepted by JoyCode's strict validator.
+		// Extra fields from the original tool (max_uses, allowed_domains,
+		// user_location, cache_control, etc.) are intentionally omitted.
+		m := map[string]interface{}{
+			"type":         toolType,
+			"name":         t.Name,
+			"input_schema": schema,
+		}
+		if t.Description != "" {
+			m["description"] = t.Description
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // convertToolsToOpenAI converts Anthropic-format tools to OpenAI function-calling format.
+// Built-in tools (type != "" && no input_schema) are skipped because they have no
+// OpenAI equivalent — callers should check hasBuiltinTools first and avoid this path.
 func convertToolsToOpenAI(tools []Tool) []interface{} {
 	result := make([]interface{}, 0, len(tools))
 	for _, t := range tools {
+		if isBuiltinTool(t) {
+			// Built-in tools (e.g. web_search_20250305) cannot be converted to
+			// OpenAI function format; skip them silently.
+			continue
+		}
 		tool := map[string]interface{}{
 			"type": "function",
 			"function": map[string]interface{}{
