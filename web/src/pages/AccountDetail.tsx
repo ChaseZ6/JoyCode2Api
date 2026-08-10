@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Alert, Card, Row, Col, Statistic, Typography, Skeleton, Tag, Select, Button,
+  Card, Row, Col, Statistic, Typography, Skeleton, Tag, Select, Button,
   message, Space, Table, Badge, Segmented, Popconfirm, Tooltip, Divider,
 } from 'antd';
 import {
   ArrowLeftOutlined, ApiOutlined, ThunderboltOutlined,
   CheckCircleOutlined, ReloadOutlined,
-  ClockCircleOutlined, GlobalOutlined, FireOutlined, CopyOutlined,
+  ClockCircleOutlined, GlobalOutlined, FireOutlined,
   DeleteOutlined, QuestionCircleOutlined, InfoCircleOutlined,
   CloseCircleOutlined, SwapOutlined,
 } from '@ant-design/icons';
@@ -17,9 +17,6 @@ import {
 import { useParams, useNavigate } from 'react-router-dom';
 import { api, accountDisplayName } from '../api';
 import type { Account, AccountStats, ModelInfo, RequestLog } from '../api';
-import SvgClaudeCode from '../components/ClaudeCodeIcon';
-import SvgCodex from '../components/CodexIcon';
-import CommandTooltip from '../components/CommandTooltip';
 
 // Offline fallback only. The selector is normally populated from
 // /api/accounts/:id/models, which reflects what the account can actually use.
@@ -60,10 +57,11 @@ const statusTag = (code: number) => {
 
 const formatTime = (t: string) => {
   if (!t) return '-';
-  const d = new Date(t + (t.includes('Z') || t.includes('+') ? '' : 'Z'));
-  if (isNaN(d.getTime())) return t;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  // Request timestamps are stored by SQLite as server-local wall-clock text
+  // (YYYY-MM-DD HH:mm:ss). Appending Z would falsely label them as UTC and
+  // shift the displayed time by the browser's timezone offset.
+  const normalized = t.replace('T', ' ');
+  return normalized.length >= 19 ? normalized.slice(0, 19) : normalized;
 };
 
 const formatLatency = (ms: number) => {
@@ -74,45 +72,6 @@ const formatLatency = (ms: number) => {
   const m = Math.floor(s / 60);
   const remainS = s % 60;
   return `${m}m${remainS > 0 ? ` ${remainS}s` : ''}`;
-};
-
-const getBaseURL = () => `${window.location.protocol}//${window.location.host}`;
-
-const buildClaudeCodeCmd = (apiKey: string, model = 'GLM-5.1') => [
-  `API_TIMEOUT_MS=6000000 \\`,
-  `CLAUDE_CODE_MAX_RETRIES=3 \\`,
-  `NODE_TLS_REJECT_UNAUTHORIZED=0 \\`,
-  `ANTHROPIC_BASE_URL=${getBaseURL()} \\`,
-  `ANTHROPIC_API_KEY="${apiKey}" \\`,
-  `CLAUDE_CODE_MAX_OUTPUT_TOKENS=6553655 \\`,
-  `ANTHROPIC_MODEL=${model} \\`,
-  `claude --dangerously-skip-permissions`,
-].join('\n');
-
-const buildCodexCmd = (apiKey: string, model = 'GLM-5.1') => [
-  `OPENAI_BASE_URL=${getBaseURL()}/v1 \\`,
-  `OPENAI_API_KEY="${apiKey}" \\`,
-  `OPENAI_MODEL=${model} \\`,
-  `codex`,
-].join('\n');
-
-const copyCmd = async (text: string, label: string) => {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.cssText = 'position:fixed;left:-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-    }
-    message.success(`${label} 命令已复制到剪贴板`);
-  } catch {
-    message.error('复制失败');
-  }
 };
 
 const AccountDetail: React.FC = () => {
@@ -341,7 +300,7 @@ const AccountDetail: React.FC = () => {
           </div>
         </div>
         <Space wrap>
-          <Tooltip title="此模型的用途仅限生成下方的快速启动命令。实际请求中的模型由客户端指定（如 ANTHROPIC_MODEL 环境变量），始终优先于本设置。模型列表来自 JoyCode API 支持的模型 + 服务器动态获取的扩展模型。">
+          <Tooltip title="当客户端请求的模型不可用或未指定时，优先使用此账号的默认模型。模型列表来自该账号当前可用的 JoyCode 模型。">
             <QuestionCircleOutlined style={{ color: '#94A3B8', cursor: 'help' }} />
           </Tooltip>
           <Select
@@ -391,75 +350,6 @@ const AccountDetail: React.FC = () => {
           </Popconfirm>
         </Space>
       </div>
-
-      {/* Quick start commands */}
-      {isClaudeModel(account.default_model) && (
-        <Alert
-          type="warning"
-          showIcon
-          message="Claude 模型需要 JoyCode IDE 登录态"
-          description="请确保本机 JoyCode IDE 已登录，否则 Claude 模型无法使用。"
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      <Card size="small" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-          <Typography.Text strong style={{ fontSize: 13 }}>
-            快速启动命令
-          </Typography.Text>
-          <Tooltip title="模型优先级：客户端指定的模型（如启动命令中的 ANTHROPIC_MODEL）始终优先。上方设置的「默认模型」仅用于生成这些命令中的模型参数。如果你手动修改了启动命令中的模型，以你手动指定的为准。">
-            <Typography.Text style={{ fontSize: 12, color: '#94A3B8', cursor: 'help' }}>
-              <InfoCircleOutlined /> 模型优先级说明
-            </Typography.Text>
-          </Tooltip>
-        </div>
-        <Row gutter={[16, 12]}>
-          <Col xs={24} md={12}>
-            <div className="jc-code-block">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <SvgClaudeCode />
-                  <Typography.Text strong style={{ fontSize: 13 }}>Claude Code</Typography.Text>
-                </div>
-                <CommandTooltip
-                  command={buildClaudeCodeCmd(account.api_token, account.default_model || undefined)}
-                  label="Claude Code"
-                >
-                  <Button
-                    type="text" size="small" icon={<CopyOutlined />}
-                    onClick={() => copyCmd(buildClaudeCodeCmd(account.api_token, account.default_model || undefined), 'Claude Code')}
-                  />
-                </CommandTooltip>
-              </div>
-              <pre style={{ margin: 0, fontFamily: 'inherit', fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-wrap', color: '#cdd6f4' }}>
-{buildClaudeCodeCmd(account.api_token, account.default_model || undefined)}
-              </pre>
-            </div>
-          </Col>
-          <Col xs={24} md={12}>
-            <div className="jc-code-block">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <SvgCodex />
-                  <Typography.Text strong style={{ fontSize: 13 }}>Codex</Typography.Text>
-                </div>
-                <CommandTooltip
-                  command={buildCodexCmd(account.api_token, account.default_model || undefined)}
-                  label="Codex"
-                >
-                  <Button
-                    type="text" size="small" icon={<CopyOutlined />}
-                    onClick={() => copyCmd(buildCodexCmd(account.api_token, account.default_model || undefined), 'Codex')}
-                  />
-                </CommandTooltip>
-              </div>
-              <pre style={{ margin: 0, fontFamily: 'inherit', fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-wrap', color: '#cdd6f4' }}>
-{buildCodexCmd(account.api_token, account.default_model || undefined)}
-              </pre>
-            </div>
-          </Col>
-        </Row>
-      </Card>
 
       {/* Live session status */}
       <Card

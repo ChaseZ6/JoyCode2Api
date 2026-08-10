@@ -567,21 +567,6 @@ code, pre, .ant-typography code, .jc-mono {
   color: var(--jc-accent);
 }
 
-/* Code preview block — terminal-like */
-.jc-code-block {
-  background: #0a0e1a;
-  border: 1px solid var(--jc-border-soft);
-  border-radius: 6px;
-  padding: 12px 14px;
-  font-family: 'Fira Code', monospace;
-  font-size: 12px;
-  line-height: 1.7;
-  color: #cdd6f4;
-  white-space: pre-wrap;
-  word-break: break-all;
-  overflow: auto;
-}
-
 /* Auth pages (Login/Setup/ForgotPassword) — dark gradient backdrop */
 .jc-auth-bg {
   min-height: 100vh;
