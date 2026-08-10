@@ -525,3 +525,63 @@ func TestRerank_Valid(t *testing.T) {
 		t.Errorf("expected 1 result, got %v", result)
 	}
 }
+
+func TestModels_PostRejected(t *testing.T) {
+	srv, cleanup := setupOpenAIServer(nil)
+	defer cleanup()
+
+	resp, err := http.Post(srv.URL+"/v1/models", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Errorf("content-type = %q", got)
+	}
+}
+
+func TestChat_OptionsAllowsOpenAIHeaders(t *testing.T) {
+	srv, cleanup := setupOpenAIServer(nil)
+	defer cleanup()
+
+	req, _ := http.NewRequest(http.MethodOptions, srv.URL+"/v1/chat/completions", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	allowed := resp.Header.Get("Access-Control-Allow-Headers")
+	for _, want := range []string{"Authorization", "Content-Type", "OpenAI-Project", "X-API-Key"} {
+		if !strings.Contains(allowed, want) {
+			t.Errorf("allow headers %q missing %q", allowed, want)
+		}
+	}
+}
+
+func TestUnknownV1_ReturnsJSON404(t *testing.T) {
+	srv, cleanup := setupOpenAIServer(nil)
+	defer cleanup()
+
+	resp, err := http.Get(srv.URL + "/v1/embeddings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("content-type = %q, want JSON", got)
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	errBody := body["error"].(map[string]interface{})
+	if errBody["code"] != "endpoint_not_found" {
+		t.Errorf("error = %#v", errBody)
+	}
+}

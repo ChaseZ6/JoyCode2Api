@@ -2,8 +2,11 @@ package openai
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
@@ -34,16 +37,21 @@ func (s *Server) getClient(r *http.Request) *joycode.Client {
 // RegisterRoutes registers all OpenAI-compatible endpoints on the mux.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/chat/completions", s.handleChat)
+	mux.HandleFunc("/v1/responses", s.handleNativeResponses)
+	mux.HandleFunc("/responses", s.handleNativeResponses)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/web-search", s.handleWebSearch)
 	mux.HandleFunc("/v1/rerank", s.handleRerank)
+	mux.HandleFunc("/v1/", handleUnknownV1)
 	mux.HandleFunc("/health", s.handleHealth)
 }
+
+const corsAllowedHeaders = "Authorization, Content-Type, Accept, OpenAI-Organization, OpenAI-Project, X-API-Key, X-Request-ID"
 
 func writeCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "*")
+	w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
@@ -60,9 +68,35 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]interface{}{
-		"error": map[string]string{"message": msg, "type": "api_error"},
-	})
+	writeOpenAIError(w, code, msg, "api_error", "", "")
+}
+
+func writeOpenAIError(w http.ResponseWriter, status int, message, errorType, code, param string) {
+	errBody := map[string]interface{}{"message": message, "type": errorType}
+	if code != "" {
+		errBody["code"] = code
+	}
+	if param != "" {
+		errBody["param"] = param
+	}
+	writeJSON(w, status, map[string]interface{}{"error": errBody})
+}
+
+func upstreamHTTPStatus(err error) int {
+	if err == nil {
+		return http.StatusBadGateway
+	}
+	if isTimeoutError(err.Error()) {
+		return http.StatusGatewayTimeout
+	}
+	var upstream *joycode.UpstreamError
+	if errors.As(err, &upstream) {
+		combined := upstream.Message + " " + upstream.Cause
+		if strings.Contains(strings.ToLower(combined), "context") || upstream.Code == "400" {
+			return http.StatusBadRequest
+		}
+	}
+	return http.StatusBadGateway
 }
 
 func requirePOST(w http.ResponseWriter, r *http.Request) bool {
@@ -84,7 +118,22 @@ func requireGET(w http.ResponseWriter, r *http.Request) bool {
 		w.WriteHeader(200)
 		return false
 	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return false
+	}
 	return true
+}
+
+func handleUnknownV1(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		writeCORS(w)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	writeOpenAIError(w, http.StatusNotFound,
+		fmt.Sprintf("Unknown API endpoint: %s", r.URL.Path),
+		"invalid_request_error", "endpoint_not_found", "")
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

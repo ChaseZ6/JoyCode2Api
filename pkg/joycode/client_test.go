@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -212,6 +213,26 @@ func TestClient_Post_Success(t *testing.T) {
 	}
 	if got["code"] != want["code"] {
 		t.Errorf("Post() code = %v, want %v", got["code"], want["code"])
+	}
+}
+
+func TestClient_Post_BusinessError(t *testing.T) {
+	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"code":"1","echo":"content length exceeded 5242880 bytes"}`))
+	}))
+	defer cleanup()
+
+	_, err := c.Post("/api/test", nil)
+	if err == nil {
+		t.Fatal("Post() should return error for an HTTP 200 business error")
+	}
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) {
+		t.Fatalf("error type = %T, want *UpstreamError", err)
+	}
+	if upstream.Code != "1" || upstream.Message != "content length exceeded 5242880 bytes" {
+		t.Errorf("unexpected business error: %+v", upstream)
 	}
 }
 

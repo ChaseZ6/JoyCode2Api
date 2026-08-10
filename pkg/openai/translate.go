@@ -8,6 +8,35 @@ import (
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 )
 
+// ValidateChatRequest validates the container shapes shared by every upstream
+// adapter. Adapter-specific semantic validation remains in its translator.
+func ValidateChatRequest(req *ChatRequest) error {
+	if len(req.Messages) == 0 {
+		return fmt.Errorf("messages is required")
+	}
+	var messages []json.RawMessage
+	if err := json.Unmarshal(req.Messages, &messages); err != nil {
+		return fmt.Errorf("messages must be an array")
+	}
+	if len(messages) == 0 {
+		return fmt.Errorf("messages must not be empty")
+	}
+	if len(req.Tools) > 0 {
+		var tools []json.RawMessage
+		if err := json.Unmarshal(req.Tools, &tools); err != nil {
+			return fmt.Errorf("tools must be an array")
+		}
+	}
+	for name, raw := range map[string]json.RawMessage{
+		"tool_choice": req.ToolChoice, "response_format": req.ResponseFormat, "stop": req.Stop,
+	} {
+		if len(raw) > 0 && !json.Valid(raw) {
+			return fmt.Errorf("%s must be valid JSON", name)
+		}
+	}
+	return nil
+}
+
 // TranslateRequest converts an OpenAI ChatRequest to JoyCode API body.
 //
 // upstreamModel is the resolved upstream identifier (chatApiModel). It must be
@@ -49,6 +78,18 @@ func TranslateRequest(req *ChatRequest, upstreamModel string) map[string]interfa
 	}
 	if len(req.Thinking) > 0 && (ReasoningModels[req.Model] || ReasoningModels[upstreamModel]) {
 		body["thinking"] = json.RawMessage(req.Thinking)
+	}
+	if req.ReasoningEffort != "" {
+		body["reasoning_effort"] = req.ReasoningEffort
+	}
+	if len(req.ResponseFormat) > 0 {
+		body["response_format"] = json.RawMessage(req.ResponseFormat)
+	}
+	if req.ParallelToolCalls != nil {
+		body["parallel_tool_calls"] = *req.ParallelToolCalls
+	}
+	if req.StreamOptions != nil {
+		body["stream_options"] = req.StreamOptions
 	}
 	return body
 }

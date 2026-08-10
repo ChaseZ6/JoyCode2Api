@@ -1,0 +1,191 @@
+package openai
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
+)
+
+// handleNativeResponses exposes the OpenAI Responses endpoint used by Codex and
+// CC Switch. The payload is intentionally preserved as a generic JSON object so
+// newer Responses fields pass through without waiting for a proxy release.
+func (s *Server) handleNativeResponses(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
+	var body map[string]interface{}
+	if err := decoder.Decode(&body); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "Invalid Responses request: "+err.Error(),
+			"invalid_request_error", "invalid_json", "")
+		return
+	}
+	requestedModel, _ := body["model"].(string)
+	if strings.TrimSpace(requestedModel) == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "model is required",
+			"invalid_request_error", "invalid_request", "model")
+		return
+	}
+
+	systemDefault := ""
+	configuredMaxTokens := 0
+	if s.store != nil {
+		systemDefault = s.store.GetSetting("default_model")
+		configuredMaxTokens = s.store.GetIntSetting("default_max_tokens", 0)
+	}
+	model := ResolveModelInfo(requestedModel, store.GetAccountDefaultModel(r), systemDefault)
+	if model.Adapter() != joycode.AdapterOpenAIResponse {
+		writeOpenAIError(w, http.StatusBadRequest,
+			fmt.Sprintf("model %s is not served by the Responses API", model.DisplayName()),
+			"invalid_request_error", "unsupported_model", "model")
+		return
+	}
+	body["model"] = model.APIName()
+	store.SetModel(r, model.DisplayName())
+
+	// Codex sends max_output_tokens directly. Apply the same model-aware ceiling
+	// as Chat Completions while preserving the public Responses field name.
+	requestedMax := intFromJSON(body["max_output_tokens"])
+	body["max_output_tokens"] = model.EffectiveMaxTokens(requestedMax, configuredMaxTokens)
+	stream, _ := body["stream"].(bool)
+	if stream {
+		s.handleNativeResponsesStream(w, r, s.getClient(r), body)
+		return
+	}
+	s.handleNativeResponsesNonStream(w, r, s.getClient(r), body)
+}
+
+func (s *Server) handleNativeResponsesNonStream(w http.ResponseWriter, r *http.Request, client *joycode.Client, body map[string]interface{}) {
+	response, err := client.PostResponses(body)
+	if err != nil {
+		status := upstreamHTTPStatus(err)
+		errorType := "api_error"
+		code := "upstream_error"
+		if status == http.StatusBadRequest {
+			errorType, code = "invalid_request_error", "invalid_request"
+		}
+		writeOpenAIError(w, status, err.Error(), errorType, code, "")
+		return
+	}
+	if usage, ok := response["usage"].(map[string]interface{}); ok {
+		store.SetTokenUsage(r, intFromJSON(usage["input_tokens"]), intFromJSON(usage["output_tokens"]))
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleNativeResponsesStream(w http.ResponseWriter, r *http.Request, client *joycode.Client, body map[string]interface{}) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported by server")
+		return
+	}
+	response, committed := connectResponsesStream(w, flusher, r, client, body)
+	if response == nil {
+		return
+	}
+	defer response.Body.Close()
+	if !committed {
+		prepareSSE(w)
+		w.WriteHeader(http.StatusOK)
+	}
+
+	reads := readNativeResponsesSSE(response.Body)
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+	var inTk, outTk int
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			writeSSEHeartbeat(w, flusher)
+		case item, open := <-reads:
+			if !open {
+				if inTk > 0 || outTk > 0 {
+					store.SetTokenUsage(r, inTk, outTk)
+				}
+				return
+			}
+			if item.Err != nil {
+				writeSSEError(w, flusher, item.Err.Error(), "api_error", "upstream_error")
+				return
+			}
+			if item.InputTokens > 0 || item.OutputTokens > 0 {
+				inTk, outTk = item.InputTokens, item.OutputTokens
+			}
+			fmt.Fprintf(w, "data: %s\n\n", item.Data)
+			flusher.Flush()
+		}
+	}
+}
+
+type nativeResponsesRead struct {
+	Data         string
+	InputTokens  int
+	OutputTokens int
+	Err          error
+}
+
+func readNativeResponsesSSE(body interface{ Read([]byte) (int, error) }) <-chan nativeResponsesRead {
+	out := make(chan nativeResponsesRead)
+	go func() {
+		defer close(out)
+		scanner := bufio.NewScanner(body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			for strings.HasPrefix(line, "data: ") {
+				line = strings.TrimPrefix(line, "data: ")
+			}
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.HasPrefix(line, "{") {
+				continue
+			}
+			var raw map[string]interface{}
+			decoder := json.NewDecoder(strings.NewReader(line))
+			decoder.UseNumber()
+			if err := decoder.Decode(&raw); err != nil {
+				out <- nativeResponsesRead{Err: fmt.Errorf("invalid Responses SSE event: %w", err)}
+				return
+			}
+			if err := joycode.DetectBusinessError(raw); err != nil {
+				out <- nativeResponsesRead{Err: err}
+				return
+			}
+			item := nativeResponsesRead{Data: line}
+			if response, ok := raw["response"].(map[string]interface{}); ok {
+				if usage, ok := response["usage"].(map[string]interface{}); ok {
+					item.InputTokens = intFromJSON(usage["input_tokens"])
+					item.OutputTokens = intFromJSON(usage["output_tokens"])
+				}
+			}
+			out <- item
+		}
+		if err := scanner.Err(); err != nil {
+			out <- nativeResponsesRead{Err: fmt.Errorf("read Responses SSE: %w", err)}
+		}
+	}()
+	return out
+}
+
+func intFromJSON(value interface{}) int {
+	switch number := value.(type) {
+	case json.Number:
+		n, _ := number.Int64()
+		return int(n)
+	case float64:
+		return int(number)
+	case int:
+		return number
+	case int64:
+		return int(number)
+	}
+	return 0
+}

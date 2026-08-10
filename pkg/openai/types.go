@@ -4,16 +4,36 @@ import "encoding/json"
 
 // ChatRequest is the OpenAI-compatible chat completion request.
 type ChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    json.RawMessage `json:"messages"`
-	Stream      bool            `json:"stream,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Tools       json.RawMessage `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	Stop        json.RawMessage `json:"stop,omitempty"`
-	Thinking    json.RawMessage `json:"thinking,omitempty"`
+	Model               string          `json:"model"`
+	Messages            json.RawMessage `json:"messages"`
+	Stream              bool            `json:"stream,omitempty"`
+	MaxTokens           int             `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	Tools               json.RawMessage `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	Stop                json.RawMessage `json:"stop,omitempty"`
+	Thinking            json.RawMessage `json:"thinking,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+	StreamOptions       *StreamOptions  `json:"stream_options,omitempty"`
+}
+
+// RequestedMaxTokens returns the modern output limit when present, otherwise
+// the legacy max_tokens value. OpenAI recommends max_completion_tokens for
+// reasoning models, but older clients still send max_tokens.
+func (r *ChatRequest) RequestedMaxTokens() int {
+	if r.MaxCompletionTokens != nil {
+		return *r.MaxCompletionTokens
+	}
+	return r.MaxTokens
+}
+
+// StreamOptions controls Chat Completions stream metadata.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 // ModelCapability describes a model's feature set.

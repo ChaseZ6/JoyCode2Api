@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,10 +16,14 @@ import (
 // "GPT-5.6 Sol"). Those models reject /chat/completions with upstream error 1032.
 
 // TranslateChatToResponses converts an OpenAI chat request into a Responses body.
-func TranslateChatToResponses(req *ChatRequest, model joycode.ModelInfo) map[string]interface{} {
+func TranslateChatToResponses(req *ChatRequest, model joycode.ModelInfo) (map[string]interface{}, error) {
+	input, err := chatMessagesToResponsesInput(req.Messages)
+	if err != nil {
+		return nil, err
+	}
 	body := map[string]interface{}{
 		"model": model.APIName(),
-		"input": chatMessagesToResponsesInput(req.Messages),
+		"input": input,
 	}
 	if req.MaxTokens > 0 {
 		body["max_output_tokens"] = req.MaxTokens
@@ -31,13 +34,39 @@ func TranslateChatToResponses(req *ChatRequest, model joycode.ModelInfo) map[str
 	if req.TopP != nil {
 		body["top_p"] = *req.TopP
 	}
-	if tools := chatToolsToResponses(req.Tools); len(tools) > 0 {
+	tools, err := chatToolsToResponses(req.Tools)
+	if err != nil {
+		return nil, err
+	}
+	if len(tools) > 0 {
 		body["tools"] = tools
 		if len(req.ToolChoice) > 0 {
-			body["tool_choice"] = json.RawMessage(req.ToolChoice)
+			choice, err := chatToolChoiceToResponses(req.ToolChoice)
+			if err != nil {
+				return nil, err
+			}
+			body["tool_choice"] = choice
 		}
 	}
-	return body
+	if req.ReasoningEffort != "" {
+		switch req.ReasoningEffort {
+		case "low", "medium", "high":
+			body["reasoning"] = map[string]interface{}{"effort": req.ReasoningEffort}
+		default:
+			return nil, fmt.Errorf("reasoning_effort must be low, medium, or high")
+		}
+	}
+	if req.ParallelToolCalls != nil {
+		body["parallel_tool_calls"] = *req.ParallelToolCalls
+	}
+	if len(req.ResponseFormat) > 0 {
+		format, err := chatResponseFormatToResponses(req.ResponseFormat)
+		if err != nil {
+			return nil, err
+		}
+		body["text"] = map[string]interface{}{"format": format}
+	}
+	return body, nil
 }
 
 // chatMessage is the subset of an OpenAI message we need to remap.
@@ -57,80 +86,161 @@ type chatMessage struct {
 // chatMessagesToResponsesInput remaps chat messages to Responses input items.
 // System messages become "developer" role; tool calls and results become
 // top-level function_call / function_call_output items.
-func chatMessagesToResponsesInput(raw json.RawMessage) []map[string]interface{} {
+func chatMessagesToResponsesInput(raw json.RawMessage) ([]map[string]interface{}, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("messages is required")
+	}
 	var msgs []chatMessage
 	if err := json.Unmarshal(raw, &msgs); err != nil {
-		return nil
+		return nil, fmt.Errorf("messages must be an array: %w", err)
+	}
+	if len(msgs) == 0 {
+		return nil, fmt.Errorf("messages must not be empty")
 	}
 	items := make([]map[string]interface{}, 0, len(msgs))
-	for _, m := range msgs {
+	for i, m := range msgs {
 		if m.Role == "tool" {
+			if m.ToolCallID == "" {
+				return nil, fmt.Errorf("messages[%d].tool_call_id is required", i)
+			}
+			output, err := contentToTextStrict(m.Content)
+			if err != nil {
+				return nil, fmt.Errorf("messages[%d].content: %w", i, err)
+			}
 			items = append(items, map[string]interface{}{
-				"type":    "function_call_output",
-				"call_id": m.ToolCallID,
-				"output":  contentToText(m.Content),
+				"type": "function_call_output", "call_id": m.ToolCallID, "output": output,
 			})
 			continue
 		}
-		if text := contentToText(m.Content); text != "" {
-			role := m.Role
-			if role == "system" {
-				role = "developer"
-			}
-			items = append(items, map[string]interface{}{
-				"role": role, "content": text,
-			})
+		role := m.Role
+		if role == "system" {
+			role = "developer"
 		}
-		for _, tc := range m.ToolCalls {
+		switch role {
+		case "user", "developer", "assistant":
+		default:
+			return nil, fmt.Errorf("messages[%d].role %q is not supported", i, m.Role)
+		}
+		if len(m.Content) > 0 && string(m.Content) != "null" {
+			content, err := contentToResponses(m.Content, role)
+			if err != nil {
+				return nil, fmt.Errorf("messages[%d].content: %w", i, err)
+			}
+			if content != nil {
+				items = append(items, map[string]interface{}{"role": role, "content": content})
+			}
+		}
+		for j, tc := range m.ToolCalls {
+			if tc.ID == "" || tc.Function.Name == "" {
+				return nil, fmt.Errorf("messages[%d].tool_calls[%d] requires id and function.name", i, j)
+			}
 			args := tc.Function.Args
 			if args == "" {
 				args = "{}"
 			}
 			items = append(items, map[string]interface{}{
-				"type":      "function_call",
-				"call_id":   tc.ID,
-				"name":      tc.Function.Name,
-				"arguments": args,
+				"type": "function_call", "call_id": tc.ID,
+				"name": tc.Function.Name, "arguments": args,
 			})
 		}
 	}
-	return items
+	return items, nil
 }
 
-// contentToText flattens a string-or-parts content field into plain text.
-func contentToText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
+func contentToResponses(raw json.RawMessage, role string) (interface{}, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, nil
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil, fmt.Errorf("must be a string or content-part array")
+	}
+	out := make([]map[string]interface{}, 0, len(parts))
+	for i, rawPart := range parts {
+		var part map[string]interface{}
+		if err := json.Unmarshal(rawPart, &part); err != nil {
+			return nil, fmt.Errorf("part %d is invalid JSON", i)
+		}
+		typeName, _ := part["type"].(string)
+		switch typeName {
+		case "text", "input_text", "output_text":
+			text, _ := part["text"].(string)
+			kind := "input_text"
+			if role == "assistant" {
+				kind = "output_text"
+			}
+			out = append(out, map[string]interface{}{"type": kind, "text": text})
+		case "image_url", "input_image":
+			if role == "assistant" {
+				return nil, fmt.Errorf("part %d: assistant image content is not supported", i)
+			}
+			url, detail := imagePart(part)
+			if url == "" {
+				return nil, fmt.Errorf("part %d: image_url.url is required", i)
+			}
+			image := map[string]interface{}{"type": "input_image", "image_url": url}
+			if detail != "" {
+				image["detail"] = detail
+			}
+			out = append(out, image)
+		default:
+			return nil, fmt.Errorf("part %d: unsupported content type %q", i, typeName)
+		}
+	}
+	return out, nil
+}
+
+func imagePart(part map[string]interface{}) (url, detail string) {
+	switch image := part["image_url"].(type) {
+	case string:
+		url = image
+	case map[string]interface{}:
+		url, _ = image["url"].(string)
+		detail, _ = image["detail"].(string)
+	}
+	if url == "" {
+		url, _ = part["image_url"].(string)
+	}
+	if detail == "" {
+		detail, _ = part["detail"].(string)
+	}
+	return
+}
+
+func contentToTextStrict(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, nil
 	}
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(raw, &parts); err == nil {
-		var sb strings.Builder
-		for _, p := range parts {
-			if p.Text == "" {
-				continue
-			}
-			if sb.Len() > 0 {
-				sb.WriteString("\n")
-			}
-			sb.WriteString(p.Text)
-		}
-		return sb.String()
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return "", fmt.Errorf("must be a string or text-part array")
 	}
-	return ""
+	var sb strings.Builder
+	for i, part := range parts {
+		if part.Type != "text" && part.Type != "input_text" && part.Type != "output_text" {
+			return "", fmt.Errorf("part %d: tool output type %q is not supported", i, part.Type)
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(part.Text)
+	}
+	return sb.String(), nil
 }
 
 // chatToolsToResponses maps OpenAI chat tools to Responses function tools, which
 // are flat rather than nested under "function".
-func chatToolsToResponses(raw json.RawMessage) []map[string]interface{} {
+func chatToolsToResponses(raw json.RawMessage) ([]map[string]interface{}, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	var tools []struct {
 		Type     string `json:"type"`
@@ -141,44 +251,127 @@ func chatToolsToResponses(raw json.RawMessage) []map[string]interface{} {
 		} `json:"function"`
 	}
 	if err := json.Unmarshal(raw, &tools); err != nil {
-		return nil
+		return nil, fmt.Errorf("tools must be an array: %w", err)
 	}
 	out := make([]map[string]interface{}, 0, len(tools))
-	for _, t := range tools {
-		if t.Function.Name == "" {
-			continue
+	for i, tool := range tools {
+		if tool.Type != "" && tool.Type != "function" {
+			return nil, fmt.Errorf("tools[%d].type %q is not supported", i, tool.Type)
+		}
+		if tool.Function.Name == "" {
+			return nil, fmt.Errorf("tools[%d].function.name is required", i)
 		}
 		params := json.RawMessage(`{"type":"object","properties":{}}`)
-		if len(t.Function.Parameters) > 0 {
-			params = t.Function.Parameters
+		if len(tool.Function.Parameters) > 0 {
+			params = tool.Function.Parameters
 		}
 		out = append(out, map[string]interface{}{
-			"type":        "function",
-			"name":        t.Function.Name,
-			"description": t.Function.Description,
-			"parameters":  params,
+			"type": "function", "name": tool.Function.Name,
+			"description": tool.Function.Description, "parameters": params,
 		})
 	}
-	return out
+	return out, nil
+}
+
+func chatToolChoiceToResponses(raw json.RawMessage) (interface{}, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		switch text {
+		case "auto", "none", "required":
+			return text, nil
+		default:
+			return nil, fmt.Errorf("tool_choice %q is not supported", text)
+		}
+	}
+	var choice struct {
+		Type     string `json:"type"`
+		Name     string `json:"name"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &choice); err != nil {
+		return nil, fmt.Errorf("tool_choice is invalid: %w", err)
+	}
+	if choice.Type != "function" {
+		return nil, fmt.Errorf("tool_choice.type %q is not supported", choice.Type)
+	}
+	name := choice.Name
+	if name == "" {
+		name = choice.Function.Name
+	}
+	if name == "" {
+		return nil, fmt.Errorf("tool_choice.function.name is required")
+	}
+	return map[string]interface{}{"type": "function", "name": name}, nil
+}
+
+func chatResponseFormatToResponses(raw json.RawMessage) (map[string]interface{}, error) {
+	var format struct {
+		Type       string `json:"type"`
+		JSONSchema struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Schema      json.RawMessage `json:"schema"`
+			Strict      *bool           `json:"strict"`
+		} `json:"json_schema"`
+	}
+	if err := json.Unmarshal(raw, &format); err != nil {
+		return nil, fmt.Errorf("response_format is invalid: %w", err)
+	}
+	switch format.Type {
+	case "text", "json_object":
+		return map[string]interface{}{"type": format.Type}, nil
+	case "json_schema":
+		if format.JSONSchema.Name == "" || len(format.JSONSchema.Schema) == 0 {
+			return nil, fmt.Errorf("response_format.json_schema requires name and schema")
+		}
+		out := map[string]interface{}{
+			"type": "json_schema", "name": format.JSONSchema.Name,
+			"schema": format.JSONSchema.Schema,
+		}
+		if format.JSONSchema.Description != "" {
+			out["description"] = format.JSONSchema.Description
+		}
+		if format.JSONSchema.Strict != nil {
+			out["strict"] = *format.JSONSchema.Strict
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("response_format.type %q is not supported", format.Type)
+	}
 }
 
 // responsesObject is the subset of the Responses response we consume.
 type responsesObject struct {
-	ID     string `json:"id"`
+	ID     string      `json:"id"`
+	Status string      `json:"status"`
+	Error  interface{} `json:"error"`
 	Output []struct {
+		ID      string `json:"id"`
 		Type    string `json:"type"`
 		Name    string `json:"name"`
 		CallID  string `json:"call_id"`
 		Args    string `json:"arguments"`
+		Summary []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"summary"`
 		Content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"output"`
 	Usage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-		TotalTokens  int `json:"total_tokens"`
+		InputTokens       int `json:"input_tokens"`
+		OutputTokens      int `json:"output_tokens"`
+		TotalTokens       int `json:"total_tokens"`
+		InputTokenDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"input_tokens_details"`
+		OutputTokenDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"output_tokens_details"`
 	} `json:"usage"`
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
@@ -197,15 +390,32 @@ func TranslateResponsesToChat(raw map[string]interface{}, model string) (map[str
 		return nil, 0, 0, err
 	}
 
-	var text strings.Builder
+	if ro.Error != nil {
+		return nil, 0, 0, fmt.Errorf("upstream response failed: %s", responseErrorMessage(ro.Error))
+	}
+	if ro.Status == "failed" {
+		return nil, 0, 0, fmt.Errorf("upstream response failed without error details")
+	}
+
+	var text, reasoning strings.Builder
 	toolCalls := []map[string]interface{}{}
 	finish := "stop"
 	for _, item := range ro.Output {
 		switch item.Type {
 		case "message":
 			for _, c := range item.Content {
-				if c.Type == "output_text" {
+				switch c.Type {
+				case "output_text":
 					text.WriteString(c.Text)
+				case "refusal":
+					finish = "content_filter"
+					text.WriteString(c.Text)
+				}
+			}
+		case "reasoning":
+			for _, summary := range item.Summary {
+				if summary.Text != "" {
+					reasoning.WriteString(summary.Text)
 				}
 			}
 		case "function_call":
@@ -213,8 +423,12 @@ func TranslateResponsesToChat(raw map[string]interface{}, model string) (map[str
 			if args == "" {
 				args = "{}"
 			}
+			callID := item.CallID
+			if callID == "" {
+				callID = item.ID
+			}
 			toolCalls = append(toolCalls, map[string]interface{}{
-				"id": item.CallID, "type": "function",
+				"id": callID, "type": "function",
 				"function": map[string]interface{}{
 					"name": item.Name, "arguments": args,
 				},
@@ -222,11 +436,23 @@ func TranslateResponsesToChat(raw map[string]interface{}, model string) (map[str
 			finish = "tool_calls"
 		}
 	}
-	if ro.IncompleteDetails != nil && ro.IncompleteDetails.Reason == "max_output_tokens" {
-		finish = "length"
+	if ro.IncompleteDetails != nil {
+		switch ro.IncompleteDetails.Reason {
+		case "max_output_tokens":
+			finish = "length"
+		case "content_filter", "safety_filter":
+			finish = "content_filter"
+		default:
+			if text.Len() == 0 && len(toolCalls) == 0 {
+				return nil, 0, 0, fmt.Errorf("upstream response incomplete: %s", ro.IncompleteDetails.Reason)
+			}
+		}
 	}
 
 	message := map[string]interface{}{"role": "assistant", "content": text.String()}
+	if reasoning.Len() > 0 {
+		message["reasoning_content"] = reasoning.String()
+	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
 	}
@@ -238,25 +464,61 @@ func TranslateResponsesToChat(raw map[string]interface{}, model string) (map[str
 	if total == 0 {
 		total = ro.Usage.InputTokens + ro.Usage.OutputTokens
 	}
+	usage := map[string]interface{}{
+		"prompt_tokens": ro.Usage.InputTokens, "completion_tokens": ro.Usage.OutputTokens,
+		"total_tokens": total,
+	}
+	if ro.Usage.InputTokenDetails.CachedTokens > 0 {
+		usage["prompt_tokens_details"] = map[string]interface{}{
+			"cached_tokens": ro.Usage.InputTokenDetails.CachedTokens,
+		}
+	}
+	if ro.Usage.OutputTokenDetails.ReasoningTokens > 0 {
+		usage["completion_tokens_details"] = map[string]interface{}{
+			"reasoning_tokens": ro.Usage.OutputTokenDetails.ReasoningTokens,
+		}
+	}
 	return map[string]interface{}{
 		"id": id, "object": "chat.completion",
 		"created": time.Now().Unix(), "model": model,
 		"choices": []map[string]interface{}{{
 			"index": 0, "message": message, "finish_reason": finish,
 		}},
-		"usage": map[string]interface{}{
-			"prompt_tokens":     ro.Usage.InputTokens,
-			"completion_tokens": ro.Usage.OutputTokens,
-			"total_tokens":      total,
-		},
+		"usage": usage,
 	}, ro.Usage.InputTokens, ro.Usage.OutputTokens, nil
 }
 
+func responseErrorMessage(raw interface{}) string {
+	switch value := raw.(type) {
+	case string:
+		return value
+	case map[string]interface{}:
+		for _, key := range []string{"message", "cause", "code"} {
+			if text, ok := value[key].(string); ok && text != "" {
+				return text
+			}
+		}
+	}
+	encoded, _ := json.Marshal(raw)
+	return string(encoded)
+}
+
 func (s *Server) handleResponsesNonStream(w http.ResponseWriter, r *http.Request, client *joycode.Client, req *ChatRequest, model joycode.ModelInfo) {
-	body := TranslateChatToResponses(req, model)
+	body, err := TranslateChatToResponses(req, model)
+	if err != nil {
+		writeOpenAIError(w, 400, err.Error(), "invalid_request_error", "invalid_request", "")
+		return
+	}
 	raw, err := client.PostResponses(body)
 	if err != nil {
-		writeError(w, 500, "上游 Responses 接口调用失败: "+err.Error())
+		status := upstreamHTTPStatus(err)
+		errorType := "api_error"
+		code := "upstream_error"
+		if status == http.StatusBadRequest {
+			errorType = "invalid_request_error"
+			code = "invalid_request"
+		}
+		writeOpenAIError(w, status, "上游 Responses 接口调用失败: "+err.Error(), errorType, code, "")
 		return
 	}
 	out, inTk, outTk, err := TranslateResponsesToChat(raw, model.DisplayName())
@@ -270,14 +532,19 @@ func (s *Server) handleResponsesNonStream(w http.ResponseWriter, r *http.Request
 
 // responsesStreamEvent is the subset of Responses SSE payloads we consume.
 type responsesStreamEvent struct {
-	Type  string `json:"type"`
-	Delta string `json:"delta"`
-	Item  struct {
+	Type      string      `json:"type"`
+	Delta     string      `json:"delta"`
+	ItemID    string      `json:"item_id"`
+	OutputIdx int         `json:"output_index"`
+	Error     interface{} `json:"error"`
+	Item      struct {
+		ID     string `json:"id"`
 		Type   string `json:"type"`
 		Name   string `json:"name"`
 		CallID string `json:"call_id"`
 	} `json:"item"`
 	Response struct {
+		Error interface{} `json:"error"`
 		Usage *struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
@@ -291,97 +558,114 @@ type responsesStreamEvent struct {
 func (s *Server) handleResponsesStream(w http.ResponseWriter, r *http.Request, client *joycode.Client, req *ChatRequest, model joycode.ModelInfo) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, 500, "streaming unsupported by server")
+		writeError(w, http.StatusInternalServerError, "streaming unsupported by server")
 		return
 	}
-	body := TranslateChatToResponses(req, model)
+	body, err := TranslateChatToResponses(req, model)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_request", "")
+		return
+	}
 	body["stream"] = true
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.WriteHeader(200)
-
-	resp, err := client.PostResponsesStream(body)
-	if err != nil {
-		fmt.Fprintf(w, "data: {\"error\":{\"message\":%q}}\n\n", err.Error())
-		flusher.Flush()
+	resp, committed := connectResponsesStream(w, flusher, r, client, body)
+	if resp == nil {
 		return
 	}
 	defer resp.Body.Close()
 
-	id := "chatcmpl-" + newShortID()
-	created := time.Now().Unix()
-	displayModel := model.DisplayName()
-	emit := func(delta map[string]interface{}, finish interface{}) {
-		chunk := map[string]interface{}{
-			"id": id, "object": "chat.completion.chunk",
-			"created": created, "model": displayModel,
-			"choices": []map[string]interface{}{{
-				"index": 0, "delta": delta, "finish_reason": finish,
-			}},
-		}
-		b, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", b)
-		flusher.Flush()
+	if !committed {
+		prepareSSE(w)
+		w.WriteHeader(http.StatusOK)
 	}
+	state := newChatResponsesStreamState(w, flusher, r, model.DisplayName(), req.StreamOptions != nil && req.StreamOptions.IncludeUsage)
+	state.emitStart()
 
-	emit(map[string]interface{}{"role": "assistant", "content": ""}, nil)
-
-	finish := "stop"
-	toolIdx := -1
-	var inTk, outTk int
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		for strings.HasPrefix(line, "data: ") {
-			line = strings.TrimPrefix(line, "data: ")
-		}
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var ev responsesStreamEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			continue
-		}
-		switch ev.Type {
-		case "response.output_text.delta":
-			if ev.Delta != "" {
-				emit(map[string]interface{}{"content": ev.Delta}, nil)
+	reads := readResponsesSSE(resp.Body)
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			writeSSEHeartbeat(w, flusher)
+		case item, open := <-reads:
+			if !open {
+				if !state.terminal && !state.failed {
+					state.fail("upstream stream ended before a terminal event", "stream_truncated")
+				}
+				return
 			}
-		case "response.output_item.added":
-			if ev.Item.Type == "function_call" {
-				toolIdx++
-				finish = "tool_calls"
-				emit(map[string]interface{}{"tool_calls": []map[string]interface{}{{
-					"index": toolIdx, "id": ev.Item.CallID, "type": "function",
-					"function": map[string]interface{}{"name": ev.Item.Name, "arguments": ""},
-				}}}, nil)
+			if item.Err != nil {
+				state.fail(item.Err.Error(), "stream_read_error")
+				return
 			}
-		case "response.function_call_arguments.delta":
-			if toolIdx >= 0 && ev.Delta != "" {
-				emit(map[string]interface{}{"tool_calls": []map[string]interface{}{{
-					"index":    toolIdx,
-					"function": map[string]interface{}{"arguments": ev.Delta},
-				}}}, nil)
+			event := item.Event
+			if event == nil {
+				continue
 			}
-		case "response.completed", "response.incomplete", "response.failed":
-			if u := ev.Response.Usage; u != nil {
-				inTk, outTk = u.InputTokens, u.OutputTokens
+			if err := handleChatResponsesEvent(state, event); err != nil {
+				state.fail(err.Error(), "upstream_protocol_error")
+				return
 			}
-			if d := ev.Response.IncompleteDetails; d != nil && d.Reason == "max_output_tokens" {
-				finish = "length"
+			if state.terminal || state.failed {
+				return
 			}
 		}
 	}
+}
 
-	emit(map[string]interface{}{}, finish)
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	flusher.Flush()
-	if inTk > 0 || outTk > 0 {
-		store.SetTokenUsage(r, inTk, outTk)
+func handleChatResponsesEvent(state *chatResponsesStreamState, event *responsesStreamEvent) error {
+	switch event.Type {
+	case "response.created", "response.in_progress", "response.output_item.done", "response.output_text.done", "response.function_call_arguments.done":
+		return nil
+	case "response.output_text.delta":
+		if event.Delta != "" {
+			state.emit(map[string]interface{}{"content": event.Delta}, nil)
+		}
+	case "response.reasoning_summary_text.delta", "response.reasoning_summary.delta":
+		if event.Delta != "" {
+			state.emit(map[string]interface{}{"reasoning_content": event.Delta}, nil)
+		}
+	case "response.output_item.added":
+		if event.Item.Type == "function_call" {
+			return state.addTool(event.Item.ID, event.Item.CallID, event.Item.Name)
+		}
+	case "response.function_call_arguments.delta":
+		return state.toolDelta(event.ItemID, event.Item.CallID, event.Delta)
+	case "response.completed":
+		state.captureUsage(event)
+		state.complete("")
+	case "response.incomplete":
+		state.captureUsage(event)
+		reason := ""
+		if event.Response.IncompleteDetails != nil {
+			reason = event.Response.IncompleteDetails.Reason
+		}
+		switch reason {
+		case "max_output_tokens":
+			state.complete("length")
+		case "content_filter", "safety_filter":
+			state.complete("content_filter")
+		default:
+			return fmt.Errorf("upstream response incomplete: %s", reason)
+		}
+	case "response.failed":
+		message := responseErrorMessage(event.Response.Error)
+		if message == "null" || message == "" {
+			message = "upstream response failed"
+		}
+		return fmt.Errorf("%s", message)
+	case "error":
+		message := responseErrorMessage(event.Error)
+		if message == "null" || message == "" {
+			message = "upstream stream returned an error"
+		}
+		return fmt.Errorf("%s", message)
+	default:
+		// Unknown events are ignored for forward compatibility. Known event
+		// families are handled above and validated where they carry state.
 	}
+	return nil
 }

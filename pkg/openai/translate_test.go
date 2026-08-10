@@ -509,3 +509,66 @@ func TestModelCapabilities(t *testing.T) {
 		t.Error("expected Kimi-K2.5 to have Vision=true")
 	}
 }
+
+func TestChatRequest_RequestedMaxTokens(t *testing.T) {
+	modern := 4096
+	cases := []struct {
+		name string
+		req  ChatRequest
+		want int
+	}{
+		{"legacy only", ChatRequest{MaxTokens: 2048}, 2048},
+		{"modern wins", ChatRequest{MaxTokens: 2048, MaxCompletionTokens: &modern}, 4096},
+		{"neither", ChatRequest{}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.req.RequestedMaxTokens(); got != tc.want {
+				t.Errorf("RequestedMaxTokens() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTranslateRequest_ModernParameters(t *testing.T) {
+	parallel := false
+	req := &ChatRequest{
+		Model:             "JoyAI-Code-1.5",
+		ReasoningEffort:   "high",
+		ResponseFormat:    json.RawMessage(`{"type":"json_object"}`),
+		ParallelToolCalls: &parallel,
+		StreamOptions:     &StreamOptions{IncludeUsage: true},
+	}
+	body := TranslateRequest(req, "JoyAI-Code-1.5")
+	if body["reasoning_effort"] != "high" {
+		t.Errorf("reasoning_effort = %v", body["reasoning_effort"])
+	}
+	if got, ok := body["parallel_tool_calls"].(bool); !ok || got {
+		t.Errorf("parallel_tool_calls = %#v, want false", body["parallel_tool_calls"])
+	}
+	if _, ok := body["response_format"].(json.RawMessage); !ok {
+		t.Errorf("response_format type = %T, want json.RawMessage", body["response_format"])
+	}
+	options, ok := body["stream_options"].(*StreamOptions)
+	if !ok || !options.IncludeUsage {
+		t.Errorf("stream_options = %#v", body["stream_options"])
+	}
+}
+
+func TestValidateChatRequest(t *testing.T) {
+	valid := ChatRequest{Messages: json.RawMessage(`[{"role":"user","content":"hi"}]`)}
+	if err := ValidateChatRequest(&valid); err != nil {
+		t.Fatalf("valid request: %v", err)
+	}
+	cases := []ChatRequest{
+		{},
+		{Messages: json.RawMessage(`[]`)},
+		{Messages: json.RawMessage(`{"role":"user"}`)},
+		{Messages: valid.Messages, Tools: json.RawMessage(`{"type":"function"}`)},
+	}
+	for i := range cases {
+		if err := ValidateChatRequest(&cases[i]); err == nil {
+			t.Errorf("case %d: expected error", i)
+		}
+	}
+}

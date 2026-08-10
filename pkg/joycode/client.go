@@ -388,6 +388,10 @@ func (c *Client) Post(endpoint string, body map[string]interface{}) (map[string]
 		slog.Error("unmarshal upstream response", "endpoint", endpoint, "error", err)
 		return nil, fmt.Errorf("invalid JSON response (parse error: %s): %s", err.Error(), truncate(string(data), 500))
 	}
+	if err := DetectBusinessError(result); err != nil {
+		slog.Error("upstream business error", "endpoint", endpoint, "error", err)
+		return nil, err
+	}
 	return result, nil
 }
 
