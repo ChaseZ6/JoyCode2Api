@@ -27,7 +27,7 @@ var modelsCmd = &cobra.Command{
 				pref = " *"
 			}
 			fmt.Printf("  %s (%s) ctx=%d out=%d%s\n",
-				m.Label, m.ChatAPIModel, m.MaxTotalTokens, m.RespMaxTokens, pref)
+				m.Label, m.ChatAPIModel, m.ContextWindowTokens(), m.RespMaxTokens, pref)
 		}
 		return nil
 	},

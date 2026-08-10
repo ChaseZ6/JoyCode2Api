@@ -65,15 +65,16 @@ var configCmd = &cobra.Command{
 			fmt.Printf("    Plist:     %s\n", plistPath)
 		}
 
-		// Models
+		// Models. No fetcher is registered outside `serve`, so this prints the
+		// built-in snapshot; use `joycode-proxy models` for the live list.
 		fmt.Println()
-		fmt.Println("  Available Models:")
-		for _, m := range joycode.Models {
+		fmt.Println("  Available Models (built-in snapshot):")
+		for _, m := range joycode.DefaultRegistry.Visible() {
 			suffix := ""
-			if m == joycode.DefaultModel {
+			if m.APIName() == joycode.DefaultModel {
 				suffix = " (default)"
 			}
-			fmt.Printf("    - %s%s\n", m, suffix)
+			fmt.Printf("    - %s%s\n", m.DisplayName(), suffix)
 		}
 
 		return nil

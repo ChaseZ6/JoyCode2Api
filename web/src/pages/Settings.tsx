@@ -18,6 +18,8 @@ interface FieldConfig {
   placeholder: string;
   type: 'input' | 'number' | 'select' | 'switch';
   options?: { label: string; value: string }[];
+  /** When set, options are loaded at runtime instead of hardcoded. */
+  dynamicOptions?: 'models';
   suffix?: string;
   readOnly?: boolean;
   tag?: string;
@@ -34,23 +36,18 @@ const FIELD_GROUPS = [
         tooltip: '当客户端未指定模型，且账号未配置默认模型时使用的 JoyCode 模型',
         placeholder: 'JoyAI-Code',
         type: 'select' as const,
-        options: [
-          { label: 'JoyAI-Code — 主力代码模型（推荐）', value: 'JoyAI-Code' },
-          { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
-          { label: 'GLM-5.1 — 智谱 GLM 5.1', value: 'GLM-5.1' },
-          { label: 'GLM-5 — 智谱 GLM 5', value: 'GLM-5' },
-          { label: 'GLM-4.7 — 智谱 GLM 4.7', value: 'GLM-4.7' },
-          { label: 'Kimi-K2.6 — Moonshot Kimi K2.6', value: 'Kimi-K2.6' },
-          { label: 'Kimi-K2.5 — Moonshot Kimi K2.5', value: 'Kimi-K2.5' },
-          { label: 'MiniMax-M2.7 — MiniMax M2.7', value: 'MiniMax-M2.7' },
-          { label: 'Doubao-Seed-2.0-pro — 豆包 Seed 2.0 Pro', value: 'Doubao-Seed-2.0-pro' },
-        ],
+        // Populated at runtime from /api/models; see modelOptions below.
+        dynamicOptions: 'models' as const,
+        options: [],
       },
       {
         key: 'default_max_tokens',
-        label: '默认最大输出 Token',
-        tooltip: '客户端未指定 max_tokens 时的默认值。更大值允许更长回复，但消耗更多配额',
-        placeholder: '8192',
+        label: '最小输出 Token 下限',
+        tooltip:
+          '留空即自动使用模型自报的输出上限（当前各模型为 64000），这也是推荐值。' +
+          '客户端传入的较小值会被抬升到此下限，避免推理模型在输出正文前就被截断。' +
+          '填入具体数值可改用更低的下限；无论如何都不会超过模型自身上限',
+        placeholder: '自动（模型上限）',
         type: 'number' as const,
         tag: '已生效',
       },
@@ -114,8 +111,20 @@ const SettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [changePwLoading, setChangePwLoading] = useState(false);
+  const [modelOptions, setModelOptions] = useState<{ label: string; value: string }[]>([]);
   const [form] = Form.useForm();
   const [pwForm] = Form.useForm();
+
+  // The available models come from upstream and change without a release, so the
+  // selector is populated live rather than from a hardcoded list.
+  const fetchModels = async () => {
+    try {
+      const models = await api.listModels();
+      setModelOptions(models.map((m) => ({ label: m.name || m.id, value: m.id })));
+    } catch {
+      // Leave the selector free-text if the list is unavailable.
+    }
+  };
 
   const fetchSettings = async () => {
     setLoading(true);
@@ -143,6 +152,7 @@ const SettingsPage: React.FC = () => {
   };
 
   useEffect(() => { fetchSettings(); }, [form]);
+  useEffect(() => { fetchModels(); }, []);
 
   const handleSave = async (values: Settings) => {
     setSaving(true);
@@ -224,7 +234,13 @@ const SettingsPage: React.FC = () => {
       case 'select':
         return (
           <Form.Item key={field.key} name={field.key} label={label}>
-            <Select placeholder={field.placeholder} options={field.options} allowClear disabled={field.readOnly} />
+            <Select
+              placeholder={field.placeholder}
+              options={field.dynamicOptions === 'models' && modelOptions.length > 0 ? modelOptions : field.options}
+              allowClear
+              showSearch
+              disabled={field.readOnly}
+            />
           </Form.Item>
         );
       case 'switch':

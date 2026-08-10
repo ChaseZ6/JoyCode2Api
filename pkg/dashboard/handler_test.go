@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 	"testing"
+	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
@@ -137,8 +137,8 @@ func TestHandleAddAndListAccounts(t *testing.T) {
 
 	// Add account
 	req := makeRequest(t, "POST", "/api/accounts", map[string]interface{}{
-		"user_id": "test-user",
-		"pt_key":  "test-pt",
+		"user_id":  "test-user",
+		"pt_key":   "test-pt",
 		"nickname": "TestNick",
 	})
 	w := httptest.NewRecorder()

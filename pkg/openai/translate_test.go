@@ -16,7 +16,7 @@ func TestTranslateRequest_Basic(t *testing.T) {
 		Model:    "JoyAI-Code",
 		Messages: json.RawMessage(`[{"role":"user","content":"hello"}]`),
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["model"] != "JoyAI-Code" {
 		t.Errorf("expected model=JoyAI-Code, got %v", body["model"])
 	}
@@ -39,7 +39,7 @@ func TestTranslateRequest_MaxTokens(t *testing.T) {
 		Model:     "JoyAI-Code",
 		MaxTokens: 1024,
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["max_tokens"] != 1024 {
 		t.Errorf("expected max_tokens=1024, got %v", body["max_tokens"])
 	}
@@ -52,7 +52,7 @@ func TestTranslateRequest_Temperature(t *testing.T) {
 		Model:       "JoyAI-Code",
 		Temperature: &temp,
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["temperature"] != 0.7 {
 		t.Errorf("expected temperature=0.7, got %v", body["temperature"])
 	}
@@ -65,7 +65,7 @@ func TestTranslateRequest_TopP(t *testing.T) {
 		Model: "JoyAI-Code",
 		TopP:  &topP,
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["top_p"] != 0.9 {
 		t.Errorf("expected top_p=0.9, got %v", body["top_p"])
 	}
@@ -77,7 +77,7 @@ func TestTranslateRequest_Tools(t *testing.T) {
 		Model: "JoyAI-Code",
 		Tools: json.RawMessage(`[{"type":"function","function":{"name":"test"}}]`),
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	tools, ok := body["tools"].([]interface{})
 	if !ok || len(tools) != 1 {
 		t.Fatalf("expected 1 tool, got %v", body["tools"])
@@ -97,7 +97,7 @@ func TestTranslateRequest_ToolChoice(t *testing.T) {
 		Model:      "JoyAI-Code",
 		ToolChoice: json.RawMessage(`"auto"`),
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["tool_choice"] == nil {
 		t.Error("expected tool_choice to be set")
 	}
@@ -114,7 +114,7 @@ func TestTranslateRequest_Stop(t *testing.T) {
 		Model: "JoyAI-Code",
 		Stop:  json.RawMessage(`["STOP","END"]`),
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["stop"] == nil {
 		t.Error("expected stop to be set")
 	}
@@ -126,7 +126,7 @@ func TestTranslateRequest_Thinking(t *testing.T) {
 		Model:    "GLM-5.1",
 		Thinking: json.RawMessage(`{"type":"enabled","budget_tokens":5000}`),
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["thinking"] == nil {
 		t.Error("expected thinking to be set for reasoning model GLM-5.1")
 	}
@@ -135,7 +135,7 @@ func TestTranslateRequest_Thinking(t *testing.T) {
 // Test 9: Empty request (no optional fields)
 func TestTranslateRequest_Empty(t *testing.T) {
 	req := &ChatRequest{}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["model"] != "" {
 		t.Errorf("expected empty model, got %v", body["model"])
 	}
@@ -162,7 +162,7 @@ func TestTranslateRequest_StreamFlag(t *testing.T) {
 		Model:  "JoyAI-Code",
 		Stream: true,
 	}
-	body := TranslateRequest(req)
+	body := TranslateRequest(req, "")
 	if body["stream"] != true {
 		t.Errorf("expected stream=true, got %v", body["stream"])
 	}
@@ -171,9 +171,32 @@ func TestTranslateRequest_StreamFlag(t *testing.T) {
 		Model:  "JoyAI-Code",
 		Stream: false,
 	}
-	body2 := TranslateRequest(req2)
+	body2 := TranslateRequest(req2, "")
 	if body2["stream"] != false {
 		t.Errorf("expected stream=false, got %v", body2["stream"])
+	}
+}
+
+// The upstream body must carry the resolved chatApiModel, not the client's
+// display label. For Claude models upstream accepts the label but silently
+// serves it with a different model, so passing the label through is a bug.
+func TestTranslateRequest_UsesUpstreamModel(t *testing.T) {
+	req := &ChatRequest{
+		Model:    "Claude-Opus-4.7",
+		Messages: json.RawMessage(`[{"role":"user","content":"hi"}]`),
+	}
+	body := TranslateRequest(req, "Claude-Opus-4.7-hq")
+	if body["model"] != "Claude-Opus-4.7-hq" {
+		t.Errorf("expected upstream model to override req.Model, got %v", body["model"])
+	}
+}
+
+// An empty upstream model falls back to the request's own model.
+func TestTranslateRequest_EmptyUpstreamModelFallsBack(t *testing.T) {
+	req := &ChatRequest{Model: "GLM-5.2"}
+	body := TranslateRequest(req, "")
+	if body["model"] != "GLM-5.2" {
+		t.Errorf("expected fallback to req.Model, got %v", body["model"])
 	}
 }
 
@@ -256,15 +279,56 @@ func TestTranslateModels_Multiple(t *testing.T) {
 	}
 }
 
-// Test 16: Model with ModelID uses ModelID
-func TestTranslateModels_UsesModelID(t *testing.T) {
+// The advertised id is the display label, not the internal modelId. Clients echo
+// the id back as "model", and only the label (or chatApiModel) resolves upstream
+// — upstream does not accept modelId.
+func TestTranslateModels_UsesLabelNotModelID(t *testing.T) {
 	models := []joycode.ModelInfo{
 		{Label: "Display Name", ModelID: "internal-id"},
 	}
 	result := TranslateModels(models)
 	data := result["data"].([]map[string]interface{})
-	if data[0]["id"] != "internal-id" {
-		t.Errorf("expected id=internal-id, got %v", data[0]["id"])
+	if data[0]["id"] != "Display Name" {
+		t.Errorf("expected id=Display Name, got %v", data[0]["id"])
+	}
+}
+
+// Hidden models (e.g. the internal JoyCode-Base-V3 completion model) are not
+// offered to clients.
+func TestTranslateModels_SkipsHidden(t *testing.T) {
+	models := []joycode.ModelInfo{
+		{Label: "Visible"},
+		{Label: "Internal", Hidden: true},
+		{Label: "AlsoInternal", IsHidden: true},
+	}
+	result := TranslateModels(models)
+	data := result["data"].([]map[string]interface{})
+	if len(data) != 1 {
+		t.Fatalf("expected 1 visible model, got %d", len(data))
+	}
+	if data[0]["id"] != "Visible" {
+		t.Errorf("expected id=Visible, got %v", data[0]["id"])
+	}
+}
+
+// Capabilities are derived from the live upstream feature list, so models added
+// upstream are described correctly without a code change.
+func TestTranslateModels_CapabilitiesFromUpstream(t *testing.T) {
+	models := []joycode.ModelInfo{{
+		Label: "GPT-5.6 Sol", Features: []string{"function_call", "vision"},
+		MaxTotalTokens: 200000, RespMaxTokens: 64000,
+	}}
+	result := TranslateModels(models)
+	data := result["data"].([]map[string]interface{})
+	caps, ok := data[0]["capabilities"].(ModelCapability)
+	if !ok {
+		t.Fatalf("expected ModelCapability, got %T", data[0]["capabilities"])
+	}
+	if !caps.Vision {
+		t.Error("expected vision=true from upstream features")
+	}
+	if caps.MaxTokens != 64000 || caps.Ctx != 1_000_000 {
+		t.Errorf("expected GPT-5.6 Sol limits MaxTokens=64000 Ctx=1000000, got MaxTokens=%d Ctx=%d", caps.MaxTokens, caps.Ctx)
 	}
 }
 

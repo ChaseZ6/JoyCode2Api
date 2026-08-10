@@ -200,8 +200,10 @@ func TestModels_Get(t *testing.T) {
 	}
 }
 
-// Test 32: Server error returns 500
-func TestModels_ServerError(t *testing.T) {
+// An upstream failure degrades to the registry's cached/static list instead of
+// failing the request: clients use /v1/models to populate a selector, and an
+// error there leaves them with no models at all. The failure is logged.
+func TestModels_UpstreamErrorFallsBackToRegistry(t *testing.T) {
 	errorBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		w.Write([]byte(`{"error":"internal"}`))
@@ -225,8 +227,16 @@ func TestModels_ServerError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 500 {
-		t.Fatalf("expected 500, got %d", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	data, ok := result["data"].([]interface{})
+	if !ok || len(data) == 0 {
+		t.Fatalf("expected a non-empty fallback list, got %v", result["data"])
 	}
 }
 
@@ -320,8 +330,11 @@ func TestChat_ValidNonStream(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result["model"] != "JoyAI-Code" {
-		t.Errorf("expected model=JoyAI-Code, got %v", result["model"])
+	// The response reports the model that actually served the request, matching
+	// OpenAI's own behaviour. "JoyAI-Code" was renamed upstream to
+	// "JoyAI-Code-1.5", and the registry resolves the old name to it.
+	if result["model"] != "JoyAI-Code-1.5" {
+		t.Errorf("expected model=JoyAI-Code-1.5, got %v", result["model"])
 	}
 	if result["object"] != "chat.completion" {
 		t.Errorf("expected object=chat.completion, got %v", result["object"])
@@ -478,9 +491,9 @@ func TestRerank_Valid(t *testing.T) {
 	rerankResp := map[string]interface{}{
 		"results": []interface{}{
 			map[string]interface{}{
-				"index":          float64(0),
+				"index":           float64(0),
 				"relevance_score": float64(0.95),
-				"document":       map[string]interface{}{"text": "doc1"},
+				"document":        map[string]interface{}{"text": "doc1"},
 			},
 		},
 	}

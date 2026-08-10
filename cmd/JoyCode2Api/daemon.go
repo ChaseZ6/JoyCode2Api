@@ -20,15 +20,15 @@ import (
 )
 
 const (
-	daemonChildEnv    = "_JOYCODE_DAEMON_CHILD"
+	daemonChildEnv      = "_JOYCODE_DAEMON_CHILD"
 	daemonSupervisorEnv = "_JOYCODE_DAEMON_SUPERVISOR"
-	daemonPortEnv     = "_JOYCODE_DAEMON_PORT"
-	daemonVerboseEnv  = "_JOYCODE_DAEMON_VERBOSE"
-	daemonSkipValEnv  = "_JOYCODE_DAEMON_SKIP_VALIDATION"
-	pidFileName       = ".joycode-proxy/daemon.pid"
-	logFileName       = ".joycode-proxy/logs/daemon.log"
-	maxRestartDelay   = 30 * time.Second
-	baseRestartDelay  = 1 * time.Second
+	daemonPortEnv       = "_JOYCODE_DAEMON_PORT"
+	daemonVerboseEnv    = "_JOYCODE_DAEMON_VERBOSE"
+	daemonSkipValEnv    = "_JOYCODE_DAEMON_SKIP_VALIDATION"
+	pidFileName         = ".joycode-proxy/daemon.pid"
+	logFileName         = ".joycode-proxy/logs/daemon.log"
+	maxRestartDelay     = 30 * time.Second
+	baseRestartDelay    = 1 * time.Second
 )
 
 var (
@@ -90,8 +90,8 @@ var daemonStatusCmd = &cobra.Command{
 }
 
 var daemonLogsCmd = &cobra.Command{
-	Use:     "logs",
-	Short:   "查看守护进程日志（最后 N 行）",
+	Use:   "logs",
+	Short: "查看守护进程日志（最后 N 行）",
 	Example: `  joycode-proxy daemon logs
   joycode-proxy daemon logs -n 50`,
 	RunE: func(cmd *cobra.Command, args []string) error {

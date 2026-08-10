@@ -21,19 +21,13 @@ import SvgClaudeCode from '../components/ClaudeCodeIcon';
 import SvgCodex from '../components/CodexIcon';
 import CommandTooltip from '../components/CommandTooltip';
 
+// Offline fallback only. The selector is normally populated from
+// /api/accounts/:id/models, which reflects what the account can actually use.
 const BUILTIN_MODELS = [
-  { label: 'JoyAI-Code（推荐）', value: 'JoyAI-Code' },
-  { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
-  { label: 'GLM-5.1', value: 'GLM-5.1' },
-  { label: 'GLM-5', value: 'GLM-5' },
-  { label: 'GLM-4.7', value: 'GLM-4.7' },
-  { label: 'Kimi-K2.6', value: 'Kimi-K2.6' },
-  { label: 'Kimi-K2.5', value: 'Kimi-K2.5' },
-  { label: 'MiniMax-M2.7', value: 'MiniMax-M2.7' },
-  { label: 'Doubao-Seed-2.0-pro', value: 'Doubao-Seed-2.0-pro' },
+  { label: 'JoyAI-Code-1.5（推荐）', value: 'JoyAI-Code-1.5' },
 ];
 
-const isClaudeModel = (model?: string) => model === 'Claude-Opus-4.7';
+const isClaudeModel = (model?: string) => !!model && /^claude/i.test(model);
 
 const PIE_COLORS = ['#22C55E', '#3B82F6', '#F59E0B', '#EF4444', '#A855F7', '#06B6D4', '#EC4899', '#84CC16'];
 
@@ -210,12 +204,11 @@ const AccountDetail: React.FC = () => {
   }
   if (!account) return <div style={{ textAlign: 'center', padding: 100 }}>账号不存在</div>;
 
-  const allModelOptions = [
-    ...BUILTIN_MODELS,
-    ...models
-      .filter((m) => !BUILTIN_MODELS.some((b) => b.value === m.id))
-      .map((m) => ({ label: m.name || m.id, value: m.id })),
-  ];
+  // Prefer live upstream models; fall back to the builtin list only if the
+  // request failed. The API returns {id,name}, so both fields are populated.
+  const allModelOptions = models.length > 0
+    ? models.map((m) => ({ label: m.name || m.id, value: m.id }))
+    : BUILTIN_MODELS;
 
   const filteredLogs = logFilter === 'all'
     ? logs

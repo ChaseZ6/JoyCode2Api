@@ -9,7 +9,25 @@ import (
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 )
 
+// seedRegistry pins the model registry to a known list so resolution tests do
+// not depend on what upstream currently offers.
+func seedRegistry(t *testing.T) {
+	t.Helper()
+	joycode.DefaultRegistry.Seed([]joycode.ModelInfo{
+		{Label: "JoyAI-Code-1.5", ChatAPIModel: "JoyAI-Code-1.5"},
+		{Label: "GLM-5.1", ChatAPIModel: "GLM-5.1"},
+		{Label: "Kimi-K2.6", ChatAPIModel: "Kimi-K2.6"},
+		{Label: "GPT-5.6 Sol", ChatAPIModel: "GPT-5.6 Sol",
+			ExtJSON: map[string]interface{}{"adapterType": joycode.AdapterOpenAIResponse}},
+		{Label: "Claude-Opus-4.8", ChatAPIModel: "Claude-Opus-4.8-hq", SortOrder: 51,
+			ExtJSON: map[string]interface{}{"adapterType": joycode.AdapterAnthropic}},
+		{Label: "Claude-Opus-4.7", ChatAPIModel: "Claude-Opus-4.7-hq", SortOrder: 50,
+			ExtJSON: map[string]interface{}{"adapterType": joycode.AdapterAnthropic}},
+	})
+}
+
 func TestResolveModel(t *testing.T) {
+	seedRegistry(t)
 	tests := []struct {
 		name           string
 		model          string
@@ -17,10 +35,16 @@ func TestResolveModel(t *testing.T) {
 		systemDefault  string
 		expected       string
 	}{
-		{"known joycode model passes through", "GLM-4.7", "", "", "GLM-4.7"},
-		{"unknown model falls back to default", "claude-sonnet-4-20250514", "", "", joycode.DefaultModel},
-		{"account default overrides for unknown model", "claude-opus-4", "Kimi-K2.6", "GLM-5.1", "Kimi-K2.6"},
+		{"known model passes through", "GLM-5.1", "", "", "GLM-5.1"},
+		{"unknown model falls back to default", "some-unknown-model", "", "", joycode.DefaultModel},
+		{"account default overrides for unknown model", "nope", "Kimi-K2.6", "GLM-5.1", "Kimi-K2.6"},
 		{"system default used when no account default", "unknown-model", "", "GLM-5.1", "GLM-5.1"},
+		// Resolution must yield chatApiModel, not the label: upstream accepts
+		// the label but silently serves it with a different, weaker model.
+		{"claude label resolves to -hq api name", "Claude-Opus-4.7", "", "", "Claude-Opus-4.7-hq"},
+		// Model names containing spaces must survive dash/space normalisation.
+		{"space and dash forms both resolve", "gpt-5.6-sol", "", "", "GPT-5.6 Sol"},
+		{"exact spaced form resolves", "GPT-5.6 Sol", "", "", "GPT-5.6 Sol"},
 	}
 	for _, tt := range tests {
 		got := resolveModel(tt.model, tt.accountDefault, tt.systemDefault)
@@ -28,6 +52,23 @@ func TestResolveModel(t *testing.T) {
 			t.Errorf("%s: resolveModel(%q, %q, %q) = %q, want %q",
 				tt.name, tt.model, tt.accountDefault, tt.systemDefault, got, tt.expected)
 		}
+	}
+}
+
+// The native Anthropic path must send chatApiModel and must not be pinned to a
+// hardcoded version, so newly released Claude models are reachable.
+func TestResolveNativeAnthropicModel(t *testing.T) {
+	seedRegistry(t)
+	if got := resolveNativeAnthropicModel("Claude-Opus-4.7", "", ""); got != "Claude-Opus-4.7-hq" {
+		t.Errorf("expected Claude-Opus-4.7-hq, got %q", got)
+	}
+	if got := resolveNativeAnthropicModel("Claude-Opus-4.8", "", ""); got != "Claude-Opus-4.8-hq" {
+		t.Errorf("expected Claude-Opus-4.8-hq, got %q", got)
+	}
+	// An unknown Claude alias should land on the newest Anthropic model rather
+	// than a hardcoded one.
+	if got := resolveNativeAnthropicModel("claude-sonnet-4-5-20250929", "", ""); got != "Claude-Opus-4.8-hq" {
+		t.Errorf("expected newest Claude (Claude-Opus-4.8-hq), got %q", got)
 	}
 }
 

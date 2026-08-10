@@ -20,19 +20,18 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/auth"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/proxy"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
+	_ "modernc.org/sqlite"
 )
 
 type Handler struct {
-	store     *store.Store
-	staticFS  fs.FS
-	modelList []string
-	keeper    *keepalive.Keeper
+	store    *store.Store
+	staticFS fs.FS
+	keeper   *keepalive.Keeper
 	// Version is the proxy version reported by /api/health; set by the server
 	// at startup (the build-time Version lives in package main).
 	Version string
@@ -40,10 +39,9 @@ type Handler struct {
 
 func NewHandler(s *store.Store, staticFS fs.FS, k *keepalive.Keeper) *Handler {
 	return &Handler{
-		store:     s,
-		staticFS:  staticFS,
-		modelList: joycode.Models,
-		keeper:    k,
+		store:    s,
+		staticFS: staticFS,
+		keeper:   k,
 	}
 }
 
@@ -187,16 +185,16 @@ func (h *Handler) handleErrors(w http.ResponseWriter, r *http.Request) {
 // commonly hit without the /v1/ prefix. When these paths arrive at the
 // SPA catch-all we return a JSON 404 with a helpful hint instead of HTML.
 var knownAPISet = map[string]bool{
-	"/chat/completions":      true,
-	"/completions":           true,
-	"/messages":              true,
-	"/models":                true,
-	"/embeddings":            true,
-	"/web-search":            true,
-	"/rerank":                true,
-	"/images/generations":    true,
-	"/audio/transcriptions":  true,
-	"/audio/translations":    true,
+	"/chat/completions":     true,
+	"/completions":          true,
+	"/messages":             true,
+	"/models":               true,
+	"/embeddings":           true,
+	"/web-search":           true,
+	"/rerank":               true,
+	"/images/generations":   true,
+	"/audio/transcriptions": true,
+	"/audio/translations":   true,
 }
 
 // ServeStatic serves the SPA frontend for non-API routes.
@@ -525,7 +523,11 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		statuses := h.keeper.GetAllStatuses()
 		for i := range accounts {
 			if s, ok := statuses[accounts[i].UserID]; ok {
-				if s.Valid { accounts[i].CredentialValid = 1 } else { accounts[i].CredentialValid = 0 }
+				if s.Valid {
+					accounts[i].CredentialValid = 1
+				} else {
+					accounts[i].CredentialValid = 0
+				}
 				accounts[i].CredentialCheckedAt = s.LastChecked.Format("2006-01-02 15:04:05")
 				accounts[i].CredentialError = s.ErrorMessage
 			}
@@ -1151,18 +1153,23 @@ func (h *Handler) listAccountModels(w http.ResponseWriter, r *http.Request, apiK
 		return
 	}
 
+	// Carry the gateway routing context; without it this client falls back to
+	// direct v2 URLs, which fail in gateway-only environments.
 	client := joycode.NewClient(account.PtKey, account.UserID)
+	if creds, cerr := auth.LoadFromSystem(); cerr == nil {
+		client.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
+	}
 	models, err := client.ListModels()
 	if err != nil {
 		slog.Error("list account models", "api_key", apiKey, "error", err)
-		// Fallback to hardcoded list
+		// Fall back to the registry (cached live data, or the static snapshot).
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"models": modelInfos(h.modelList),
+			"models": modelOptions(joycode.DefaultRegistry.Visible()),
 		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"models": models})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"models": modelOptions(models)})
 }
 
 func (h *Handler) getAccountStats(w http.ResponseWriter, r *http.Request, apiKey string) {
@@ -1313,14 +1320,27 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"models": modelInfos(h.modelList),
+		"models": modelOptions(joycode.DefaultRegistry.Visible()),
 	})
 }
 
-func modelInfos(models []string) []map[string]string {
-	result := make([]map[string]string, len(models))
-	for i, m := range models {
-		result[i] = map[string]string{"id": m, "name": m}
+// modelOptions renders models in the {id,name,...} shape the web UI consumes.
+// The id is the display label, which is what clients send back as "model".
+func modelOptions(models []joycode.ModelInfo) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(models))
+	for _, m := range models {
+		if m.IsHiddenModel() || m.DisplayName() == "" {
+			continue
+		}
+		result = append(result, map[string]interface{}{
+			"id":          m.DisplayName(),
+			"name":        m.DisplayName(),
+			"adapter":     m.Adapter(),
+			"description": m.Description,
+			"ctx":         m.ContextWindowTokens(),
+			"max_tokens":  m.MaxOutputTokens(),
+			"api_model":   m.APIName(),
+		})
 	}
 	return result
 }
@@ -1358,18 +1378,18 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]interface{}{
-		"total_requests":       stats.TotalRequests,
-		"total_input_tokens":   stats.TotalInputTk,
-		"total_output_tokens":  stats.TotalOutputTk,
-		"accounts_count":       stats.AccountsCount,
-		"avg_latency_ms":       stats.AvgLatencyMs,
-		"error_count":          stats.ErrorCount,
-		"stream_count":         stats.StreamCount,
-		"success_count":        stats.SuccessCount,
-		"by_model":             stats.ByModel,
-		"by_account":           stats.ByAccount,
-		"all_time":             totals,
-		"hourly":               hourly,
+		"total_requests":      stats.TotalRequests,
+		"total_input_tokens":  stats.TotalInputTk,
+		"total_output_tokens": stats.TotalOutputTk,
+		"accounts_count":      stats.AccountsCount,
+		"avg_latency_ms":      stats.AvgLatencyMs,
+		"error_count":         stats.ErrorCount,
+		"stream_count":        stats.StreamCount,
+		"success_count":       stats.SuccessCount,
+		"by_model":            stats.ByModel,
+		"by_account":          stats.ByAccount,
+		"all_time":            totals,
+		"hourly":              hourly,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

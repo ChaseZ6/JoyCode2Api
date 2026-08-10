@@ -26,17 +26,48 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	systemDefault := ""
+	configuredMaxTokens := 0
 	if s.store != nil {
 		systemDefault = s.store.GetSetting("default_model")
+		configuredMaxTokens = s.store.GetIntSetting("default_max_tokens", 0)
 	}
-	model := ResolveModel(req.Model, store.GetAccountDefaultModel(r), systemDefault)
-		store.SetModel(r, model)
-		jcBody := TranslateRequest(&req)
+	info := ResolveModelInfo(req.Model, store.GetAccountDefaultModel(r), systemDefault)
+	store.SetModel(r, info.DisplayName())
+
+	// Resolve max_tokens against the model's own cap once the model is known.
+	requestedMaxTokens := req.MaxTokens
+	req.MaxTokens = info.EffectiveMaxTokens(requestedMaxTokens, configuredMaxTokens)
+	slog.Info("chat request", "model", req.Model, "resolved", info.APIName(),
+		"adapter", info.Adapter(), "stream", req.Stream,
+		"max_tokens", req.MaxTokens, "max_tokens_requested", requestedMaxTokens)
+
 	client := s.getClient(r)
+
+	// Dispatch on the model's upstream adapter: sending a model to the wrong
+	// endpoint fails with the opaque upstream error 1032.
+	switch info.Adapter() {
+	case joycode.AdapterOpenAIResponse:
+		if req.Stream {
+			s.handleResponsesStream(w, r, client, &req, info)
+		} else {
+			s.handleResponsesNonStream(w, r, client, &req, info)
+		}
+		return
+	case joycode.AdapterAnthropic:
+		// Claude models are served only by the native Anthropic endpoint, which
+		// this OpenAI-compatible handler does not speak. Fail loudly rather than
+		// letting upstream return an opaque 1032.
+		writeError(w, 400, fmt.Sprintf(
+			"模型 %s 需要 Anthropic 原生接口，请改用 /v1/messages 端点，或在此端点选择非 Claude 模型。",
+			info.DisplayName()))
+		return
+	}
+
+	jcBody := TranslateRequest(&req, info.APIName())
 	if req.Stream {
-		s.handleStreamChat(w, r, client, jcBody, model)
+		s.handleStreamChat(w, r, client, jcBody, info.DisplayName())
 	} else {
-		s.handleNonStreamChat(w, r, client, jcBody, model)
+		s.handleNonStreamChat(w, r, client, jcBody, info.DisplayName())
 	}
 }
 

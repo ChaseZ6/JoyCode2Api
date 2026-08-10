@@ -64,27 +64,44 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, 400, fmt.Sprintf("请求体解析失败: %s。请检查请求是否完整，或尝试开启新对话减少上下文长度。", err.Error()))
 		return
 	}
-	defaultMaxTokens := 8192
+	accountDefault := store.GetAccountDefaultModel(r)
+	systemDefault := ""
+	configuredMaxTokens := 0
 	if h.store != nil {
-		defaultMaxTokens = h.store.GetIntSetting("default_max_tokens", 8192)
+		systemDefault = h.store.GetSetting("default_model")
+		configuredMaxTokens = h.store.GetIntSetting("default_max_tokens", 0)
 	}
-	if req.MaxTokens <= 0 {
-		req.MaxTokens = defaultMaxTokens
-	}
-	if req.MaxTokens > 32768 {
-		req.MaxTokens = 32768
-	}
+	info := ResolveModelInfo(req.Model, accountDefault, systemDefault)
+	store.SetModel(r, info.DisplayName())
 
-		accountDefault := store.GetAccountDefaultModel(r)
-		systemDefault := ""
-		if h.store != nil {
-			systemDefault = h.store.GetSetting("default_model")
-		}
-		resolved := resolveModel(req.Model, accountDefault, systemDefault)
-		store.SetModel(r, resolved)
-		reqLog(r).Info("anthropic request", "model", req.Model, "resolved", resolved, "stream", req.Stream, "max_tokens", req.MaxTokens, "messages", len(req.Messages), "tools", len(req.Tools))
+	// Resolve max_tokens against the model's own cap, which requires the model to
+	// be known first. Upstream advertises 64000 for every visible model.
+	requestedMaxTokens := req.MaxTokens
+	req.MaxTokens = info.EffectiveMaxTokens(requestedMaxTokens, configuredMaxTokens)
+
+	reqLog(r).Info("anthropic request", "model", req.Model, "resolved", info.APIName(),
+		"adapter", info.Adapter(), "stream", req.Stream,
+		"max_tokens", req.MaxTokens, "max_tokens_requested", requestedMaxTokens,
+		"messages", len(req.Messages), "tools", len(req.Tools))
 
 	client := h.getClient(r)
+
+	// Models with the openai-response adapter are served only by the upstream
+	// Responses API; both chat/completions and the native Anthropic endpoint
+	// reject them with the opaque error 1032.
+	if info.Adapter() == joycode.AdapterOpenAIResponse {
+		if req.Stream {
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				writeAnthropicError(w, 500, "streaming unsupported by server")
+				return
+			}
+			h.handleResponsesStream(w, r, &req, client, flusher, info)
+		} else {
+			h.handleResponsesNonStream(w, r, &req, client, info)
+		}
+		return
+	}
 
 	if req.Stream {
 		h.handleStream(w, r, &req, client)
@@ -93,12 +110,29 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// useNativeAnthropic reports whether a request should go to the upstream native
+// Anthropic endpoint. It dispatches on the resolved model's adapter type rather
+// than a name prefix, and keeps the enable_claude gate.
+func (h *Handler) useNativeAnthropic(r *http.Request, req *MessageRequest, systemDefault string) bool {
+	if !ClaudeNativeEnabled(h.store) {
+		return false
+	}
+	info := ResolveModelInfo(req.Model, store.GetAccountDefaultModel(r), systemDefault)
+	if info.Adapter() == joycode.AdapterAnthropic {
+		return true
+	}
+	// The client asked for a Claude model by a name the registry does not know
+	// (e.g. an upstream alias like claude-sonnet-4-5-20250929). Honour the
+	// intent and use the native path.
+	return IsNativeAnthropicModel(req.Model) && info.Adapter() != joycode.AdapterOpenAIResponse
+}
+
 func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client) {
 	systemDefault := ""
 	if h.store != nil {
 		systemDefault = h.store.GetSetting("default_model")
 	}
-	if ClaudeNativeEnabled(h.store) && (IsNativeAnthropicModel(req.Model) || IsNativeAnthropicModel(resolveModel(req.Model, store.GetAccountDefaultModel(r), systemDefault))) {
+	if h.useNativeAnthropic(r, req, systemDefault) {
 		h.handleNativeAnthropicNonStream(w, r, req, client, systemDefault)
 		return
 	}
@@ -155,7 +189,7 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 		}
 		if strings.Contains(errMsg, "content_filter") || strings.Contains(errMsg, "SENSITIVE_CONTENT") {
 			reqLog(r).Warn("upstream content_filter (non-stream), returning detailed error")
-				writeContentFilterError(w, errMsg)
+			writeContentFilterError(w, errMsg)
 			return
 		}
 		writeAnthropicError(w, 500, errMsg)
@@ -212,7 +246,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		writeAnthropicError(w, 500, "streaming not supported")
 		return
 	}
-	if ClaudeNativeEnabled(h.store) && (IsNativeAnthropicModel(req.Model) || IsNativeAnthropicModel(resolveModel(req.Model, store.GetAccountDefaultModel(r), systemDefault))) {
+	if h.useNativeAnthropic(r, req, systemDefault) {
 		h.handleNativeAnthropicStream(w, r, req, client, flusher, systemDefault)
 		return
 	}
@@ -652,8 +686,10 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 // self-consistent Anthropic SSE stream with correct IDs and usage fields.
 //
 // The upstream wraps every line with an extra "data: " prefix:
-//   data: event: content_block_start
-//   data: data: {"type":"content_block_start",...}
+//
+//	data: event: content_block_start
+//	data: data: {"type":"content_block_start",...}
+//
 // We strip the outer "data: " then handle the inner "event: " / "data: " normally.
 func (h *Handler) pipeNativeAnthropicStream(w http.ResponseWriter, r *http.Request, resp *http.Response, flusher http.Flusher) {
 	defer resp.Body.Close()

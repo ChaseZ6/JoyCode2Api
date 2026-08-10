@@ -53,19 +53,19 @@ var colorEndpoints = map[string]colorEndpoint{
 	"/api/saas/openai/v1/web-search":       {"web_search", "/api/saas/openai/v2/web-search"},
 	"/api/saas/user/v1/userInfo":           {"joycode_userInfo", "/api/saas/user/v2/userInfo"},
 	"/api/saas/anthropic/v1/messages":      {"anthropic_completions", "/api/saas/anthropic/v1/messages"},
+	"/api/saas/openai/v1/responses":        {"responses_completions", "/api/saas/openai/v1/responses"},
 }
 
-var Models = []string{
-	"JoyAI-Code",
-	"Claude-Opus-4.7",
-	"MiniMax-M2.7",
-	"Kimi-K2.6",
-	"Kimi-K2.5",
-	"GLM-5.1",
-	"GLM-5",
-	"GLM-4.7",
-	"Doubao-Seed-2.0-pro",
-}
+// ResponsesEndpoint is the OpenAI Responses API endpoint, used by models whose
+// adapterType is AdapterOpenAIResponse (e.g. "GPT-5.6 Sol"). Those models reject
+// the chat/completions endpoint.
+const ResponsesEndpoint = "/api/saas/openai/v1/responses"
+
+// ChatCompletionsEndpoint serves models with no adapterType.
+const ChatCompletionsEndpoint = "/api/saas/openai/v1/chat/completions"
+
+// AnthropicMessagesEndpoint serves models whose adapterType is AdapterAnthropic.
+const AnthropicMessagesEndpoint = "/api/saas/anthropic/v1/messages"
 
 type Client struct {
 	PtKey          string
@@ -427,6 +427,18 @@ func (c *Client) PostAnthropicStream(endpoint string, body map[string]interface{
 		return nil, err
 	}
 	return resp, nil
+}
+
+// PostResponses calls the OpenAI Responses API (non-streaming). The response is
+// the Responses object, not a chat completion.
+func (c *Client) PostResponses(body map[string]interface{}) (map[string]interface{}, error) {
+	return c.Post(ResponsesEndpoint, body)
+}
+
+// PostResponsesStream calls the OpenAI Responses API in streaming mode and
+// returns the raw SSE response for the caller to translate.
+func (c *Client) PostResponsesStream(body map[string]interface{}) (*http.Response, error) {
+	return c.PostStream(ResponsesEndpoint, body)
 }
 
 func (c *Client) ListModels() ([]ModelInfo, error) {

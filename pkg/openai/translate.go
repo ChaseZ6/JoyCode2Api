@@ -9,9 +9,17 @@ import (
 )
 
 // TranslateRequest converts an OpenAI ChatRequest to JoyCode API body.
-func TranslateRequest(req *ChatRequest) map[string]interface{} {
+//
+// upstreamModel is the resolved upstream identifier (chatApiModel). It must be
+// used rather than req.Model: the client-supplied name may be an alias, and for
+// Claude models the display label is accepted upstream but silently served by a
+// different model.
+func TranslateRequest(req *ChatRequest, upstreamModel string) map[string]interface{} {
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
 	body := map[string]interface{}{
-		"model":  req.Model,
+		"model":  upstreamModel,
 		"stream": req.Stream,
 	}
 	if len(req.Messages) > 0 {
@@ -39,7 +47,7 @@ func TranslateRequest(req *ChatRequest) map[string]interface{} {
 	if len(req.Stop) > 0 {
 		body["stop"] = json.RawMessage(req.Stop)
 	}
-	if len(req.Thinking) > 0 && ReasoningModels[req.Model] {
+	if len(req.Thinking) > 0 && (ReasoningModels[req.Model] || ReasoningModels[upstreamModel]) {
 		body["thinking"] = json.RawMessage(req.Thinking)
 	}
 	return body
@@ -58,24 +66,69 @@ func TranslateResponse(jcResp map[string]interface{}, model string) map[string]i
 	}
 }
 
-// TranslateModels converts JoyCode models to OpenAI /v1/models format.
+// TranslateModels converts JoyCode models to OpenAI /v1/models format. The id is
+// the display label, which is what clients send back as "model"; hidden internal
+// models are omitted. Capabilities come from the upstream feature list so newly
+// added models are described correctly without a code change.
 func TranslateModels(jcModels []joycode.ModelInfo) map[string]interface{} {
 	data := make([]map[string]interface{}, 0, len(jcModels))
 	for _, m := range jcModels {
-		mid := m.ModelID
+		if m.IsHiddenModel() {
+			continue
+		}
+		mid := m.DisplayName()
 		if mid == "" {
-			mid = m.Label
+			continue
+		}
+		created := m.CreateTime / 1000
+		if created <= 0 {
+			created = 1700000000
 		}
 		entry := map[string]interface{}{
 			"id": mid, "object": "model",
-			"created": 1700000000, "owned_by": "joycode",
-		}
-		if caps, ok := ModelCapabilities[mid]; ok {
-			entry["capabilities"] = caps
+			"created": created, "owned_by": "joycode",
+			"capabilities": modelCapabilities(m),
 		}
 		data = append(data, entry)
 	}
 	return map[string]interface{}{"object": "list", "data": data}
+}
+
+// modelCapabilities derives a capability record from live upstream metadata,
+// preferring the static table only when upstream reports nothing useful.
+func modelCapabilities(m joycode.ModelInfo) ModelCapability {
+	caps := ModelCapability{
+		MaxTokens: m.MaxOutputTokens(),
+		Ctx:       m.ContextWindowTokens(),
+	}
+	if caps.Ctx <= 0 {
+		caps.Ctx = 200000
+	}
+	for _, f := range m.Features {
+		switch f {
+		case "vision":
+			caps.Vision = true
+		case "reasoning", "thinking":
+			caps.Reasoning = true
+		}
+	}
+	if static, ok := ModelCapabilities[m.DisplayName()]; ok {
+		if !caps.Vision {
+			caps.Vision = static.Vision
+		}
+		if !caps.Reasoning {
+			caps.Reasoning = static.Reasoning
+		}
+		// Upstream omitted the token limits; use the known-good static values
+		// rather than the generic default.
+		if m.RespMaxTokens <= 0 && static.MaxTokens > 0 {
+			caps.MaxTokens = static.MaxTokens
+		}
+		if m.MaxTotalTokens <= 0 && static.Ctx > 0 {
+			caps.Ctx = static.Ctx
+		}
+	}
+	return caps
 }
 
 // TranslateStreamChunk converts a JoyCode SSE data line to OpenAI format.
@@ -100,20 +153,14 @@ func newShortID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano()%1e12)
 }
 
-// ResolveModel returns the model to use for the request.
-// If the client-specified model is a known JoyCode model, pass it through.
-// Otherwise fall back to the account's default model, then the global default.
+// ResolveModelInfo resolves a requested model against the live model registry,
+// falling back to the account default, then the system default. Live resolution
+// means models upstream adds or removes work without a code change.
+func ResolveModelInfo(model string, accountDefault string, systemDefault string) joycode.ModelInfo {
+	return joycode.DefaultRegistry.ResolveRequest(model, accountDefault, systemDefault)
+}
+
+// ResolveModel returns the upstream identifier for the request's model.
 func ResolveModel(model string, accountDefault string, systemDefault string) string {
-	for _, m := range joycode.Models {
-		if m == model {
-			return model
-		}
-	}
-	if accountDefault != "" {
-		return accountDefault
-	}
-	if systemDefault != "" {
-		return systemDefault
-	}
-	return joycode.DefaultModel
+	return ResolveModelInfo(model, accountDefault, systemDefault).APIName()
 }

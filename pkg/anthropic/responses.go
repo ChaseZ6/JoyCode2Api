@@ -1,0 +1,588 @@
+package anthropic
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
+)
+
+// This file bridges the Anthropic Messages API to the upstream OpenAI Responses
+// API, so models whose adapterType is "openai-response" (e.g. "GPT-5.6 Sol") can
+// be driven by Anthropic clients such as Claude Code and Claude Desktop.
+//
+// Those models reject both /chat/completions and /anthropic/v1/messages; the
+// Responses endpoint is the only one that serves them, and it uses a different
+// request shape ("input" instead of "messages", "max_output_tokens" instead of
+// "max_tokens") and a different SSE event vocabulary.
+
+// TranslateAnthropicToResponses converts an Anthropic Messages request into an
+// OpenAI Responses API body targeting the given model.
+func TranslateAnthropicToResponses(req *MessageRequest, model joycode.ModelInfo) map[string]interface{} {
+	body := map[string]interface{}{
+		"model": model.APIName(),
+		"input": buildResponsesInput(req),
+	}
+	if req.MaxTokens > 0 {
+		body["max_output_tokens"] = req.MaxTokens
+	}
+	if sys := responsesInstructions(req.System); sys != "" {
+		body["instructions"] = sys
+	}
+	if req.Temperature != nil {
+		body["temperature"] = *req.Temperature
+	}
+	if req.TopP != nil {
+		body["top_p"] = *req.TopP
+	}
+	if tools := convertToolsToResponses(req.Tools); len(tools) > 0 {
+		body["tools"] = tools
+		if tc := convertToolChoiceToResponses(req.ToolChoice); tc != nil {
+			body["tool_choice"] = tc
+		}
+	}
+	return body
+}
+
+// responsesInstructions flattens an Anthropic system prompt (string or block
+// array) into the Responses API "instructions" string.
+func responsesInstructions(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var sb strings.Builder
+		for _, b := range blocks {
+			if b.Text == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString(b.Text)
+		}
+		return sb.String()
+	}
+	return ""
+}
+
+// buildResponsesInput converts Anthropic messages into Responses input items.
+// Tool calls and tool results become top-level function_call /
+// function_call_output items rather than nested content blocks.
+func buildResponsesInput(req *MessageRequest) []map[string]interface{} {
+	items := make([]map[string]interface{}, 0, len(req.Messages))
+	for _, msg := range req.Messages {
+		// Plain string content is the common case.
+		var text string
+		if err := json.Unmarshal(msg.Content, &text); err == nil {
+			if text != "" {
+				items = append(items, map[string]interface{}{
+					"role": msg.Role, "content": text,
+				})
+			}
+			continue
+		}
+
+		var blocks []contentBlock
+		if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+			continue
+		}
+
+		var parts []map[string]interface{}
+		for _, b := range blocks {
+			switch b.Type {
+			case "text":
+				if b.Text != "" {
+					parts = append(parts, map[string]interface{}{
+						"type": responsesTextType(msg.Role), "text": b.Text,
+					})
+				}
+			case "image":
+				if url := imageBlockToDataURL(b.Source); url != "" {
+					parts = append(parts, map[string]interface{}{
+						"type": "input_image", "image_url": url,
+					})
+				}
+			case "tool_use":
+				// Flush accumulated text before the call to preserve ordering.
+				if len(parts) > 0 {
+					items = append(items, map[string]interface{}{
+						"role": msg.Role, "content": parts,
+					})
+					parts = nil
+				}
+				args := "{}"
+				if len(b.Input) > 0 {
+					args = string(b.Input)
+				}
+				items = append(items, map[string]interface{}{
+					"type":      "function_call",
+					"call_id":   b.ID,
+					"name":      b.Name,
+					"arguments": args,
+				})
+			case "tool_result":
+				if len(parts) > 0 {
+					items = append(items, map[string]interface{}{
+						"role": msg.Role, "content": parts,
+					})
+					parts = nil
+				}
+				items = append(items, map[string]interface{}{
+					"type":    "function_call_output",
+					"call_id": b.ToolUseID,
+					"output":  extractToolResultContent(b.Content),
+				})
+			}
+		}
+		if len(parts) > 0 {
+			items = append(items, map[string]interface{}{
+				"role": msg.Role, "content": parts,
+			})
+		}
+	}
+	return items
+}
+
+// responsesTextType picks the content-part type: assistant turns carry
+// output_text, user/system turns carry input_text.
+func responsesTextType(role string) string {
+	if role == "assistant" {
+		return "output_text"
+	}
+	return "input_text"
+}
+
+// convertToolsToResponses maps Anthropic tool definitions to Responses function
+// tools. Anthropic server-side builtins (web_search etc.) have no Responses
+// equivalent and are dropped.
+func convertToolsToResponses(tools []Tool) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(tools))
+	for _, t := range tools {
+		if t.Name == "" || isBuiltinTool(t) {
+			continue
+		}
+		params := json.RawMessage(`{"type":"object","properties":{}}`)
+		if len(t.InputSchema) > 0 {
+			params = t.InputSchema
+		}
+		out = append(out, map[string]interface{}{
+			"type":        "function",
+			"name":        t.Name,
+			"description": t.Description,
+			"parameters":  params,
+		})
+	}
+	return out
+}
+
+// convertToolChoiceToResponses maps Anthropic tool_choice to the Responses form.
+func convertToolChoiceToResponses(raw json.RawMessage) interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var tc struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &tc); err != nil {
+		return nil
+	}
+	switch tc.Type {
+	case "any":
+		return "required"
+	case "auto":
+		return "auto"
+	case "none":
+		return "none"
+	case "tool":
+		if tc.Name != "" {
+			return map[string]interface{}{"type": "function", "name": tc.Name}
+		}
+	}
+	return nil
+}
+
+// --- Non-streaming ---
+
+// responsesObject is the subset of the Responses API response we consume.
+type responsesObject struct {
+	ID     string `json:"id"`
+	Model  string `json:"model"`
+	Status string `json:"status"`
+	Output []struct {
+		Type    string `json:"type"`
+		Name    string `json:"name"`
+		CallID  string `json:"call_id"`
+		Args    string `json:"arguments"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"output"`
+	Usage struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+	IncompleteDetails *struct {
+		Reason string `json:"reason"`
+	} `json:"incomplete_details"`
+	Error json.RawMessage `json:"error"`
+}
+
+// TranslateResponsesToAnthropic converts a Responses API object into an
+// Anthropic MessageResponse.
+func TranslateResponsesToAnthropic(raw map[string]interface{}, displayModel string) (*MessageResponse, error) {
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var ro responsesObject
+	if err := json.Unmarshal(b, &ro); err != nil {
+		return nil, err
+	}
+
+	content := make([]ContentBlock, 0, len(ro.Output))
+	stopReason := "end_turn"
+	for _, item := range ro.Output {
+		switch item.Type {
+		case "message":
+			for _, c := range item.Content {
+				if c.Type == "output_text" && c.Text != "" {
+					content = append(content, ContentBlock{Type: "text", Text: c.Text})
+				}
+			}
+		case "function_call":
+			var input interface{}
+			if item.Args != "" {
+				if err := json.Unmarshal([]byte(item.Args), &input); err != nil {
+					input = map[string]interface{}{}
+				}
+			} else {
+				input = map[string]interface{}{}
+			}
+			id := item.CallID
+			if id == "" {
+				id = NewToolUseID()
+			}
+			content = append(content, ContentBlock{
+				Type: "tool_use", ID: id, Name: item.Name, Input: input,
+			})
+			stopReason = "tool_use"
+		}
+	}
+	if ro.IncompleteDetails != nil && ro.IncompleteDetails.Reason == "max_output_tokens" {
+		stopReason = "max_tokens"
+	}
+	if len(content) == 0 {
+		content = append(content, ContentBlock{Type: "text", Text: ""})
+	}
+
+	id := ro.ID
+	if id == "" {
+		id = NewMessageID()
+	}
+	return &MessageResponse{
+		ID:         id,
+		Type:       "message",
+		Role:       "assistant",
+		Model:      displayModel,
+		Content:    content,
+		StopReason: strPtr(stopReason),
+		Usage: Usage{
+			InputTokens:  ro.Usage.InputTokens,
+			OutputTokens: ro.Usage.OutputTokens,
+		},
+	}, nil
+}
+
+func (h *Handler) handleResponsesNonStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client, model joycode.ModelInfo) {
+	body := TranslateAnthropicToResponses(req, model)
+	logRequestDetails(r, "translated responses request (non-stream)", body)
+
+	raw, err := client.PostResponses(body)
+	if err != nil {
+		reqLog(r).Error("responses non-stream upstream error", "model", model.APIName(), "error", err)
+		writeAnthropicError(w, 500, "上游 Responses 接口调用失败: "+err.Error())
+		return
+	}
+	if errField, ok := raw["error"]; ok && errField != nil {
+		if msg := responsesErrorMessage(errField); msg != "" {
+			reqLog(r).Error("responses non-stream upstream reported error", "error", msg)
+			writeAnthropicError(w, 502, "上游 Responses 接口返回错误: "+msg)
+			return
+		}
+	}
+
+	resp, err := TranslateResponsesToAnthropic(raw, model.DisplayName())
+	if err != nil {
+		reqLog(r).Error("translate responses object", "error", err)
+		writeAnthropicError(w, 502, "解析上游 Responses 响应失败: "+err.Error())
+		return
+	}
+	store.SetTokenUsage(r, resp.Usage.InputTokens, resp.Usage.OutputTokens)
+	writeAnthropicJSON(w, 200, resp)
+}
+
+// responsesErrorMessage extracts a human-readable message from an upstream error
+// field, which may be a string or an object.
+func responsesErrorMessage(v interface{}) string {
+	switch e := v.(type) {
+	case string:
+		return e
+	case map[string]interface{}:
+		if m, ok := e["message"].(string); ok {
+			return m
+		}
+		if m, ok := e["cause"].(string); ok {
+			return m
+		}
+		b, _ := json.Marshal(e)
+		return string(b)
+	}
+	return ""
+}
+
+// --- Streaming ---
+
+// responsesStreamEvent is the subset of Responses SSE payloads we consume.
+type responsesStreamEvent struct {
+	Type      string `json:"type"`
+	Delta     string `json:"delta"`
+	ItemID    string `json:"item_id"`
+	OutputIdx int    `json:"output_index"`
+	Item      struct {
+		Type   string `json:"type"`
+		Name   string `json:"name"`
+		CallID string `json:"call_id"`
+		Args   string `json:"arguments"`
+	} `json:"item"`
+	Response struct {
+		ID    string `json:"id"`
+		Usage *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+	} `json:"response"`
+}
+
+// handleResponsesStream drives a Responses-API model and re-emits its SSE stream
+// in Anthropic Messages format.
+func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client, flusher http.Flusher, model joycode.ModelInfo) {
+	body := TranslateAnthropicToResponses(req, model)
+	body["stream"] = true
+	logRequestDetails(r, "translated responses request (stream)", body)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(200)
+
+	resp, err := client.PostResponsesStream(body)
+	if err != nil {
+		reqLog(r).Error("responses stream connect failed", "model", model.APIName(), "error", err)
+		writeStreamError(w, flusher, "上游 Responses 接口调用失败: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	msgID := NewMessageID()
+	st := &responsesStreamState{
+		w: w, flusher: flusher, msgID: msgID, displayModel: model.DisplayName(),
+	}
+	st.emitMessageStart(req)
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := unwrapNativeAnthropicSSE(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var ev responsesStreamEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		st.handleEvent(&ev)
+	}
+	if err := scanner.Err(); err != nil {
+		reqLog(r).Error("responses stream read error", "error", err)
+		st.finish("end_turn")
+		writeStreamError(w, flusher, "读取上游流式响应失败，本次回复可能不完整，请重试。原始错误: "+err.Error())
+		return
+	}
+
+	st.finish("end_turn")
+	if st.inTokens > 0 || st.outTokens > 0 {
+		store.SetTokenUsage(r, st.inTokens, st.outTokens)
+	}
+	reqLog(r).Info("responses stream done", "model", model.APIName(), "blocks", st.nextIndex, "in", st.inTokens, "out", st.outTokens)
+}
+
+// responsesStreamState tracks the Anthropic-side block indices and open blocks
+// while translating a Responses stream.
+type responsesStreamState struct {
+	w            http.ResponseWriter
+	flusher      http.Flusher
+	msgID        string
+	displayModel string
+
+	nextIndex  int
+	textOpen   bool
+	textIndex  int
+	toolOpen   bool
+	toolIndex  int
+	stopReason string
+	finished   bool
+	inTokens   int
+	outTokens  int
+}
+
+func (s *responsesStreamState) send(event string, payload interface{}) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(s.w, "event: %s\n", event)
+	fmt.Fprintf(s.w, "data: %s\n\n", b)
+	s.flusher.Flush()
+}
+
+func (s *responsesStreamState) emitMessageStart(req *MessageRequest) {
+	s.send("message_start", sseMessageStart{
+		Type: "message_start",
+		Message: MessageResponse{
+			ID: s.msgID, Type: "message", Role: "assistant",
+			Model: s.displayModel, Content: []ContentBlock{},
+			Usage: Usage{InputTokens: 0, OutputTokens: 0},
+		},
+	})
+	s.send("ping", ssePing{Type: "ping"})
+}
+
+func (s *responsesStreamState) handleEvent(ev *responsesStreamEvent) {
+	switch ev.Type {
+	case "response.output_text.delta":
+		if ev.Delta == "" {
+			return
+		}
+		if !s.textOpen {
+			s.closeTool()
+			s.textIndex = s.nextIndex
+			s.nextIndex++
+			s.textOpen = true
+			s.send("content_block_start", sseContentBlockStart{
+				Type: "content_block_start", Index: s.textIndex,
+				ContentBlock: ContentBlock{Type: "text", Text: ""},
+			})
+		}
+		s.send("content_block_delta", sseContentBlockDelta{
+			Type: "content_block_delta", Index: s.textIndex,
+			Delta: deltaText{Type: "text_delta", Text: ev.Delta},
+		})
+
+	case "response.output_item.added":
+		if ev.Item.Type != "function_call" {
+			return
+		}
+		s.closeText()
+		s.closeTool()
+		s.toolIndex = s.nextIndex
+		s.nextIndex++
+		s.toolOpen = true
+		id := ev.Item.CallID
+		if id == "" {
+			id = NewToolUseID()
+		}
+		s.send("content_block_start", sseContentBlockStart{
+			Type: "content_block_start", Index: s.toolIndex,
+			ContentBlock: ContentBlock{
+				Type: "tool_use", ID: id, Name: ev.Item.Name,
+				Input: map[string]interface{}{},
+			},
+		})
+
+	case "response.function_call_arguments.delta":
+		if !s.toolOpen || ev.Delta == "" {
+			return
+		}
+		s.send("content_block_delta", sseContentBlockDelta{
+			Type: "content_block_delta", Index: s.toolIndex,
+			Delta: deltaText{Type: "input_json_delta", PartialJSON: ev.Delta},
+		})
+
+	case "response.output_item.done":
+		if ev.Item.Type == "function_call" {
+			s.stopReason = "tool_use"
+			s.closeTool()
+		}
+
+	case "response.completed", "response.incomplete", "response.failed":
+		if u := ev.Response.Usage; u != nil {
+			s.inTokens = u.InputTokens
+			s.outTokens = u.OutputTokens
+		}
+		if d := ev.Response.IncompleteDetails; d != nil && d.Reason == "max_output_tokens" {
+			s.stopReason = "max_tokens"
+		}
+	}
+}
+
+func (s *responsesStreamState) closeText() {
+	if !s.textOpen {
+		return
+	}
+	s.send("content_block_stop", sseContentBlockStop{
+		Type: "content_block_stop", Index: s.textIndex,
+	})
+	s.textOpen = false
+}
+
+func (s *responsesStreamState) closeTool() {
+	if !s.toolOpen {
+		return
+	}
+	s.send("content_block_stop", sseContentBlockStop{
+		Type: "content_block_stop", Index: s.toolIndex,
+	})
+	s.toolOpen = false
+}
+
+// finish closes any open blocks and emits message_delta + message_stop exactly
+// once.
+func (s *responsesStreamState) finish(defaultReason string) {
+	if s.finished {
+		return
+	}
+	s.finished = true
+	s.closeText()
+	s.closeTool()
+
+	reason := s.stopReason
+	if reason == "" {
+		reason = defaultReason
+	}
+	md := sseMessageDelta{
+		Type:  "message_delta",
+		Delta: deltaStop{StopReason: reason},
+	}
+	md.Usage.OutputTokens = s.outTokens
+	s.send("message_delta", md)
+	s.send("message_stop", sseMessageStop{Type: "message_stop"})
+}

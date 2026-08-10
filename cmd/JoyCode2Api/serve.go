@@ -33,9 +33,9 @@ import (
 )
 
 var (
-	serveHost       string
-	servePort       int
-	serveTLS        bool
+	serveHost      string
+	servePort      int
+	serveTLS       bool
 	requestCounter uint64
 )
 
@@ -87,6 +87,11 @@ var serveCmd = &cobra.Command{
 				log.Printf("Migrated %d token-based request logs to account api_keys", n)
 			}
 		}
+
+		// Feed the model registry from upstream so model resolution, the
+		// /v1/models endpoint and the dashboard all reflect live availability
+		// instead of a hardcoded list.
+		joycode.DefaultRegistry.SetFetcher(client.ListModels)
 
 		srv := openai.NewServer(client, s)
 		anth := anthropic.NewHandler(client, s)
@@ -143,30 +148,34 @@ var serveCmd = &cobra.Command{
 				if timeout < 60 {
 					timeout = 60
 				}
-				if apiKey != "" {
-					if account, _ := s.GetAccountByToken(apiKey); account != nil {
-						cl := joycode.NewClient(account.PtKey, account.UserID)
-						if systemClient != nil && systemClient.PtKey != "" && systemClient.PtKey != "placeholder" && systemClient.UserID == account.UserID {
-							cl.SetAnthropicPtKey(systemClient.PtKey)
-						}
-						cl.SetTimeout(time.Duration(timeout) * time.Second)
-						return cl
+
+				// newAccountClient builds a client for a DB account. The gateway
+				// routing context (tenant, loginType, color base URL) must be
+				// carried over from the local login: without it the client falls
+				// back to tenant "JOYCODE" / loginType "N_PIN_PC", which the
+				// upstream gateway rejects with "账号未登录" for JD-cloud logins.
+				newAccountClient := func(ptKey, userID string) *joycode.Client {
+					cl := joycode.NewClient(ptKey, userID)
+					if creds, err := auth.LoadFromSystem(); err == nil {
+						cl.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
 					}
-					if account, _ := s.GetAccount(apiKey); account != nil {
-						cl := joycode.NewClient(account.PtKey, account.UserID)
-						if systemClient != nil && systemClient.PtKey != "" && systemClient.PtKey != "placeholder" && systemClient.UserID == account.UserID {
-							cl.SetAnthropicPtKey(systemClient.PtKey)
-						}
-						cl.SetTimeout(time.Duration(timeout) * time.Second)
-						return cl
-					}
-				}
-				if account, _ := s.GetDefaultAccount(); account != nil {
-					cl := joycode.NewClient(account.PtKey, account.UserID)
-					if systemClient != nil && systemClient.PtKey != "" && systemClient.PtKey != "placeholder" && systemClient.UserID == account.UserID {
+					if systemClient != nil && systemClient.PtKey != "" && systemClient.PtKey != "placeholder" && systemClient.UserID == userID {
 						cl.SetAnthropicPtKey(systemClient.PtKey)
 					}
 					cl.SetTimeout(time.Duration(timeout) * time.Second)
+					return cl
+				}
+
+				if apiKey != "" {
+					if account, _ := s.GetAccountByToken(apiKey); account != nil {
+						return newAccountClient(account.PtKey, account.UserID)
+					}
+					if account, _ := s.GetAccount(apiKey); account != nil {
+						return newAccountClient(account.PtKey, account.UserID)
+					}
+				}
+				if account, _ := s.GetDefaultAccount(); account != nil {
+					cl := newAccountClient(account.PtKey, account.UserID)
 					cl.SetTransport(sharedTransport)
 					return cl
 				}
@@ -433,12 +442,12 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 			var inTk, outTk int
 			inTk, outTk = store.GetTokenUsage(r)
 			resolvedModel := store.GetModel(r)
-				if resolvedModel != "" {
-					model = resolvedModel
-				}
-				if s.GetSetting("enable_request_logging") != "false" {
-					go s.LogRequest(apiKey, model, path, isStream, rw.statusCode, latency, errMsg, inTk, outTk)
-				}
+			if resolvedModel != "" {
+				model = resolvedModel
+			}
+			if s.GetSetting("enable_request_logging") != "false" {
+				go s.LogRequest(apiKey, model, path, isStream, rw.statusCode, latency, errMsg, inTk, outTk)
+			}
 		}
 	})
 }

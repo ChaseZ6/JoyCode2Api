@@ -66,6 +66,22 @@ type ContentBlock struct {
 	Input any    `json:"input,omitempty"`
 }
 
+// MarshalJSON emits "text" only for text blocks. Anthropic includes an empty
+// "text" on text blocks (notably in content_block_start), but never carries a
+// text field on tool_use blocks, and strict clients reject the extra key.
+func (c ContentBlock) MarshalJSON() ([]byte, error) {
+	type alias ContentBlock // avoid recursing into this method
+	if c.Type == "text" {
+		return json.Marshal(alias(c))
+	}
+	return json.Marshal(struct {
+		Type  string `json:"type"`
+		ID    string `json:"id,omitempty"`
+		Name  string `json:"name,omitempty"`
+		Input any    `json:"input,omitempty"`
+	}{Type: c.Type, ID: c.ID, Name: c.Name, Input: c.Input})
+}
+
 // Usage reports token consumption.
 type Usage struct {
 	InputTokens  int `json:"input_tokens"`
@@ -92,9 +108,9 @@ type sseContentBlockDelta struct {
 }
 
 type deltaText struct {
-	Type         string `json:"type"`
-	Text         string `json:"text,omitempty"`
-	PartialJSON  string `json:"partial_json,omitempty"`
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
 }
 
 type sseContentBlockStop struct {
@@ -122,5 +138,3 @@ type ssePing struct {
 type sseMessageStop struct {
 	Type string `json:"type"`
 }
-
-

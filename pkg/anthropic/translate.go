@@ -102,15 +102,40 @@ func IsNativeAnthropicModel(model string) bool {
 	return strings.HasPrefix(m, "claude") || strings.Contains(m, "claude-")
 }
 
+// resolveNativeAnthropicModel returns the upstream identifier to send to the
+// native Anthropic endpoint. It resolves against the live model registry and
+// returns chatApiModel (e.g. "Claude-Opus-4.7-hq"), never the display label:
+// upstream accepts the label but silently serves it with a different model
+// (label "Claude-Opus-4.7" is answered by claude-sonnet-4-6).
 func resolveNativeAnthropicModel(model string, accountDefault string, systemDefault string) string {
-	resolved := resolveModel(model, accountDefault, systemDefault)
-	if resolved == "Claude-Opus-4.7" {
-		return resolved
+	info := ResolveModelInfo(model, accountDefault, systemDefault)
+	if info.Adapter() == joycode.AdapterAnthropic {
+		return info.APIName()
 	}
-	if IsNativeAnthropicModel(resolved) {
-		return "Claude-Opus-4.7"
+	// The caller decided this request belongs on the native path but the
+	// resolved model is not an Anthropic-adapter model. Fall back to the newest
+	// Claude the registry knows about.
+	if best, ok := newestAnthropicModel(); ok {
+		return best.APIName()
 	}
-	return resolved
+	return info.APIName()
+}
+
+// newestAnthropicModel returns the highest-sorted Anthropic-adapter model from
+// the registry, so the native path does not depend on a hardcoded version.
+func newestAnthropicModel() (joycode.ModelInfo, bool) {
+	var best joycode.ModelInfo
+	found := false
+	for _, m := range joycode.DefaultRegistry.Visible() {
+		if m.Adapter() != joycode.AdapterAnthropic {
+			continue
+		}
+		if !found || m.SortOrder > best.SortOrder {
+			best = m
+			found = true
+		}
+	}
+	return best, found
 }
 
 // isBuiltinTool reports whether t is an Anthropic built-in tool (e.g.
@@ -274,19 +299,18 @@ func TranslateResponse(jcResp map[string]interface{}, reqModel string) *MessageR
 	}
 }
 
+// ResolveModelInfo resolves a requested model against the live registry,
+// falling back to the account default, then the system default. Resolving
+// against live data means models upstream adds (or removes) work without a code
+// change; the previous hardcoded whitelist silently rewrote unknown models to
+// the default, which looked to the caller like the request was ignored.
+func ResolveModelInfo(model string, accountDefault string, systemDefault string) joycode.ModelInfo {
+	return joycode.DefaultRegistry.ResolveRequest(model, accountDefault, systemDefault)
+}
+
+// resolveModel returns the upstream identifier for a chat/completions request.
 func resolveModel(model string, accountDefault string, systemDefault string) string {
-	for _, m := range joycode.Models {
-		if m == model {
-			return model
-		}
-	}
-	if accountDefault != "" {
-		return accountDefault
-	}
-	if systemDefault != "" {
-		return systemDefault
-	}
-	return joycode.DefaultModel
+	return ResolveModelInfo(model, accountDefault, systemDefault).APIName()
 }
 
 // contentBlock represents a single content block in Anthropic format.
@@ -393,8 +417,8 @@ func convertAssistantBlocks(blocks []contentBlock) map[string]interface{} {
 	}
 
 	msg := map[string]interface{}{
-		"role":      "assistant",
-		"content":   strings.Join(textParts, "\n"),
+		"role":    "assistant",
+		"content": strings.Join(textParts, "\n"),
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
@@ -599,7 +623,7 @@ func convertToolChoice(raw json.RawMessage) interface{} {
 	case "tool":
 		if tc.Name != "" {
 			return map[string]interface{}{
-				"type": "function",
+				"type":     "function",
 				"function": map[string]string{"name": tc.Name},
 			}
 		}
@@ -612,6 +636,11 @@ func convertToolChoice(raw json.RawMessage) interface{} {
 // NewMessageID generates a message ID in Anthropic format.
 func NewMessageID() string {
 	return "msg_" + newID()
+}
+
+// NewToolUseID generates a tool_use block ID in Anthropic format.
+func NewToolUseID() string {
+	return "toolu_" + newID()
 }
 
 // StreamChunk represents a parsed SSE chunk from JoyCode.

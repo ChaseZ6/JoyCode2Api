@@ -27,6 +27,13 @@ export function accountDisplayName(a: { nickname?: string; remark?: string; user
 export interface ModelInfo {
   id: string;
   name: string;
+  /** Upstream adapter: '' (chat/completions), 'anthropic', or 'openai-response'. */
+  adapter?: string;
+  description?: string;
+  ctx?: number;
+  max_tokens?: number;
+  /** Upstream chatApiModel; differs from id for Claude models (-hq suffix). */
+  api_model?: string;
 }
 
 export interface Stats {
