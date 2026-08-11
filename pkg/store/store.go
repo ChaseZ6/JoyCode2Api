@@ -47,20 +47,20 @@ func (a *Account) DisplayName() string {
 }
 
 type AccountInfo struct {
-	UserID          string `json:"user_id"`
-	Nickname        string `json:"nickname"`
-	Remark          string `json:"remark"`
-	APIToken        string `json:"api_token"`
-	IsDefault       bool   `json:"is_default"`
-	DefaultModel    string `json:"default_model"`
-	CreatedAt       string `json:"created_at,omitempty"`
-	DisplayOrder    int    `json:"display_order"`
-	ActiveSessions  int64  `json:"active_sessions"`
-	TotalRequests   int    `json:"total_requests"`
-	TodayRequests   int    `json:"today_requests"`
-	TotalTokens     int    `json:"total_tokens"`
-	TodayTokens     int    `json:"today_tokens"`
-	CredentialValid      int    `json:"credential_valid"`               // -1=unknown, 0=expired, 1=valid
+	UserID              string `json:"user_id"`
+	Nickname            string `json:"nickname"`
+	Remark              string `json:"remark"`
+	APIToken            string `json:"api_token"`
+	IsDefault           bool   `json:"is_default"`
+	DefaultModel        string `json:"default_model"`
+	CreatedAt           string `json:"created_at,omitempty"`
+	DisplayOrder        int    `json:"display_order"`
+	ActiveSessions      int64  `json:"active_sessions"`
+	TotalRequests       int    `json:"total_requests"`
+	TodayRequests       int    `json:"today_requests"`
+	TotalTokens         int    `json:"total_tokens"`
+	TodayTokens         int    `json:"today_tokens"`
+	CredentialValid     int    `json:"credential_valid"` // -1=unknown, 0=expired, 1=valid
 	CredentialCheckedAt string `json:"credential_checked_at,omitempty"`
 	CredentialRefreshAt string `json:"credential_refreshed_at,omitempty"`
 	CredentialError     string `json:"credential_error,omitempty"`
@@ -95,10 +95,10 @@ type ModelCount struct {
 }
 
 type AccountCount struct {
-	UserID     string `json:"user_id"`
-	Nickname   string `json:"nickname"`
-	Remark     string `json:"remark"`
-	Count      int    `json:"count"`
+	UserID   string `json:"user_id"`
+	Nickname string `json:"nickname"`
+	Remark   string `json:"remark"`
+	Count    int    `json:"count"`
 }
 
 func (a *AccountCount) DisplayName() string {
@@ -141,11 +141,11 @@ type AllTimeTotals struct {
 }
 
 type HourlyData struct {
-	Hour        string `json:"hour"`
-	Count       int    `json:"count"`
-	InputTokens int    `json:"input_tokens"`
-	OutputTokens int   `json:"output_tokens"`
-	Errors      int    `json:"errors"`
+	Hour         string `json:"hour"`
+	Count        int    `json:"count"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	Errors       int    `json:"errors"`
 }
 
 type RequestLog struct {
@@ -619,39 +619,39 @@ func (s *Store) AddAccount(userID, ptKey, nickname string, isDefault bool, defau
 		return nil
 	}
 
-		// Check if another account already has the same pt_key (dedup by credential)
-		rows, err := s.db.Query("SELECT user_id, pt_key FROM accounts")
-		if err == nil {
-			for rows.Next() {
-				var existingUserID, encExistingPtKey string
-				if rows.Scan(&existingUserID, &encExistingPtKey) != nil {
-					continue
-				}
-				existingPtKey, decErr := s.decrypt(encExistingPtKey)
-				if decErr != nil {
-					continue
-				}
-				if existingPtKey == ptKey {
-					rows.Close()
-					encPtKey, encErr := s.encrypt(ptKey)
-					if encErr != nil {
-						slog.Error("store: encrypt pt_key failed", "user_id", userID, "error", encErr)
-						return fmt.Errorf("encrypt pt_key: %w", encErr)
-					}
-					_, err = s.db.Exec(
-						"UPDATE accounts SET user_id = ?, pt_key = ?, nickname = CASE WHEN nickname = '' OR nickname IS NULL THEN ? ELSE nickname END, updated_at = datetime('now', 'localtime') WHERE user_id = ?",
-						userID, encPtKey, nickname, existingUserID,
-					)
-					if err != nil {
-						slog.Error("store: update account (pt_key dedup) failed", "old_user_id", existingUserID, "new_user_id", userID, "error", err)
-						return err
-					}
-					slog.Info("store: merged account by pt_key dedup", "old_user_id", existingUserID, "new_user_id", userID)
-					return nil
-				}
+	// Check if another account already has the same pt_key (dedup by credential)
+	rows, err := s.db.Query("SELECT user_id, pt_key FROM accounts")
+	if err == nil {
+		for rows.Next() {
+			var existingUserID, encExistingPtKey string
+			if rows.Scan(&existingUserID, &encExistingPtKey) != nil {
+				continue
 			}
-			rows.Close()
+			existingPtKey, decErr := s.decrypt(encExistingPtKey)
+			if decErr != nil {
+				continue
+			}
+			if existingPtKey == ptKey {
+				rows.Close()
+				encPtKey, encErr := s.encrypt(ptKey)
+				if encErr != nil {
+					slog.Error("store: encrypt pt_key failed", "user_id", userID, "error", encErr)
+					return fmt.Errorf("encrypt pt_key: %w", encErr)
+				}
+				_, err = s.db.Exec(
+					"UPDATE accounts SET user_id = ?, pt_key = ?, nickname = CASE WHEN nickname = '' OR nickname IS NULL THEN ? ELSE nickname END, updated_at = datetime('now', 'localtime') WHERE user_id = ?",
+					userID, encPtKey, nickname, existingUserID,
+				)
+				if err != nil {
+					slog.Error("store: update account (pt_key dedup) failed", "old_user_id", existingUserID, "new_user_id", userID, "error", err)
+					return err
+				}
+				slog.Info("store: merged account by pt_key dedup", "old_user_id", existingUserID, "new_user_id", userID)
+				return nil
+			}
 		}
+		rows.Close()
+	}
 
 	// New account — enforce limit
 	var count int
@@ -1162,7 +1162,7 @@ func (s *Store) GetStats() (*Stats, error) {
 		return nil, err
 	}
 
-	rows, err := s.db.Query("SELECT model, COUNT(*) as cnt FROM request_logs WHERE "+tf+" AND model != '' GROUP BY model ORDER BY cnt DESC")
+	rows, err := s.db.Query("SELECT model, COUNT(*) as cnt FROM request_logs WHERE " + tf + " AND model != '' GROUP BY model ORDER BY cnt DESC")
 	if err != nil {
 		slog.Error("store: get stats by model query failed", "error", err)
 		return nil, err
@@ -1182,7 +1182,7 @@ func (s *Store) GetStats() (*Stats, error) {
 		validKeys[a.UserID] = true
 	}
 
-	rows2, err := s.db.Query("SELECT api_key, COUNT(*) as cnt FROM request_logs WHERE "+tf+" GROUP BY api_key ORDER BY cnt DESC")
+	rows2, err := s.db.Query("SELECT api_key, COUNT(*) as cnt FROM request_logs WHERE " + tf + " GROUP BY api_key ORDER BY cnt DESC")
 	if err != nil {
 		slog.Error("store: get stats by account query failed", "error", err)
 		return nil, err
@@ -1396,7 +1396,6 @@ func (s *Store) GetRecentLogs(limit int) ([]RequestLog, error) {
 	return logs, rows.Err()
 }
 
-
 // GetRecentErrors returns request logs with status_code >= 400.
 func (s *Store) GetRecentErrors(limit int) ([]RequestLog, error) {
 	if limit <= 0 {
@@ -1429,6 +1428,7 @@ func (s *Store) GetRecentErrors(limit int) ([]RequestLog, error) {
 	}
 	return logs, nil
 }
+
 // CleanupOldLogs deletes request logs older than the specified number of days.
 func (s *Store) CleanupOldLogs(days int) (int64, error) {
 	if days <= 0 {
