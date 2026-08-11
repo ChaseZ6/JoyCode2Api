@@ -1250,8 +1250,18 @@ func (s *Store) GetHourlyStats() ([]HourlyData, error) {
 }
 
 func (s *Store) GetAccountStats(userID string) (*AccountStats, error) {
+	return s.getAccountStatsAt(userID, time.Now())
+}
+
+func (s *Store) getAccountStatsAt(userID string, now time.Time) (*AccountStats, error) {
 	as := &AccountStats{UserID: userID}
-	tf := "created_at >= datetime('now', 'localtime', '-24 hours')"
+	localNow := now.In(now.Location())
+	dayStart := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, localNow.Location())
+	dayEnd := dayStart.AddDate(0, 0, 1)
+	hourlyStart := localNow.Add(-24 * time.Hour)
+	const timestampLayout = "2006-01-02 15:04:05"
+	todayFilter := "created_at >= ? AND created_at < ?"
+	todayArgs := []interface{}{dayStart.Format(timestampLayout), dayEnd.Format(timestampLayout)}
 
 	err := s.db.QueryRow(`
 		SELECT
@@ -1262,7 +1272,8 @@ func (s *Store) GetAccountStats(userID string) (*AccountStats, error) {
 			COALESCE(SUM(CASE WHEN status_code < 400 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0)
-		FROM request_logs WHERE api_key = ? AND `+tf, userID).Scan(
+		FROM request_logs WHERE api_key = ? AND `+todayFilter,
+		append([]interface{}{userID}, todayArgs...)...).Scan(
 		&as.TotalRequests, &as.AvgLatencyMs, &as.StreamCount,
 		&as.ErrorCount, &as.SuccessCount,
 		&as.TotalInputTk, &as.TotalOutputTk,
@@ -1272,7 +1283,9 @@ func (s *Store) GetAccountStats(userID string) (*AccountStats, error) {
 		return nil, err
 	}
 
-	rows, err := s.db.Query("SELECT model, COUNT(*) as cnt FROM request_logs WHERE api_key = ? AND "+tf+" GROUP BY model ORDER BY cnt DESC", userID)
+	rows, err := s.db.Query(
+		"SELECT model, COUNT(*) as cnt FROM request_logs WHERE api_key = ? AND "+todayFilter+" GROUP BY model ORDER BY cnt DESC",
+		append([]interface{}{userID}, todayArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1285,7 +1298,9 @@ func (s *Store) GetAccountStats(userID string) (*AccountStats, error) {
 		as.ByModel = append(as.ByModel, mc)
 	}
 
-	rows2, err := s.db.Query("SELECT endpoint, COUNT(*) as cnt FROM request_logs WHERE api_key = ? AND "+tf+" GROUP BY endpoint ORDER BY cnt DESC", userID)
+	rows2, err := s.db.Query(
+		"SELECT endpoint, COUNT(*) as cnt FROM request_logs WHERE api_key = ? AND "+todayFilter+" GROUP BY endpoint ORDER BY cnt DESC",
+		append([]interface{}{userID}, todayArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1298,7 +1313,7 @@ func (s *Store) GetAccountStats(userID string) (*AccountStats, error) {
 		as.ByEndpoint = append(as.ByEndpoint, ec)
 	}
 
-	// All-time totals
+	// All-time totals are intentionally independent of the daily window.
 	allTime := &AllTimeTotals{}
 	s.db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE api_key = ?", userID).Scan(&allTime.TotalRequests)
 	s.db.QueryRow("SELECT COALESCE(SUM(input_tokens), 0) FROM request_logs WHERE api_key = ?", userID).Scan(&allTime.TotalInputTk)
@@ -1306,7 +1321,7 @@ func (s *Store) GetAccountStats(userID string) (*AccountStats, error) {
 	s.db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE api_key = ? AND status_code >= 400", userID).Scan(&allTime.ErrorCount)
 	as.AllTime = allTime
 
-	// Hourly breakdown for last 24 hours
+	// Hourly breakdown remains a rolling 24-hour window.
 	hRows, err := s.db.Query(`
 		SELECT strftime('%m-%d %H', created_at) as hour,
 			COUNT(*) as count,
@@ -1314,8 +1329,8 @@ func (s *Store) GetAccountStats(userID string) (*AccountStats, error) {
 			COALESCE(SUM(output_tokens), 0),
 			SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END)
 		FROM request_logs
-		WHERE api_key = ? AND `+tf+`
-		GROUP BY hour ORDER BY hour`, userID)
+		WHERE api_key = ? AND created_at >= ? AND created_at <= ?
+		GROUP BY hour ORDER BY hour`, userID, hourlyStart.Format(timestampLayout), localNow.Format(timestampLayout))
 	if err == nil {
 		defer hRows.Close()
 		for hRows.Next() {

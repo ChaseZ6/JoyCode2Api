@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -527,5 +528,81 @@ func TestGetHourlyStatsUsesLocalHour(t *testing.T) {
 	}
 	if hourly[0].Count != 1 {
 		t.Errorf("count = %d, want 1", hourly[0].Count)
+	}
+}
+
+func TestGetAccountStats_UsesCalendarDayAndRollingHourlyWindow(t *testing.T) {
+	s := openTestStore(t)
+	loc := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, time.August, 11, 11, 0, 0, 0, loc)
+
+	insert := func(createdAt, model, endpoint string, stream, status, latency, input, output int) {
+		t.Helper()
+		_, err := s.db.Exec(`
+			INSERT INTO request_logs
+				(api_key, model, endpoint, stream, status_code, latency_ms, error_message, input_tokens, output_tokens, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
+			"key1", model, endpoint, stream, status, latency, input, output, createdAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	insert("2026-08-10 12:00:00", "Yesterday", "/yesterday", 0, 200, 900, 100, 10)
+	insert("2026-08-11 00:00:00", "Today-A", "/today-a", 1, 200, 100, 20, 2)
+	insert("2026-08-11 10:30:00", "Today-B", "/today-b", 0, 500, 300, 30, 3)
+	insert("2026-08-11 23:59:59", "Today-A", "/today-a", 1, 200, 200, 40, 4)
+	insert("2026-08-12 00:00:00", "Tomorrow", "/tomorrow", 0, 200, 700, 50, 5)
+	insert("2026-08-10 10:59:59", "Old", "/old", 0, 200, 800, 60, 6)
+
+	stats, err := s.getAccountStatsAt("key1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TotalRequests != 3 || stats.SuccessCount != 2 || stats.ErrorCount != 1 || stats.StreamCount != 2 {
+		t.Errorf("daily counts = total %d success %d error %d stream %d, want 3/2/1/2",
+			stats.TotalRequests, stats.SuccessCount, stats.ErrorCount, stats.StreamCount)
+	}
+	if stats.TotalInputTk != 90 || stats.TotalOutputTk != 9 {
+		t.Errorf("daily tokens = %d/%d, want 90/9", stats.TotalInputTk, stats.TotalOutputTk)
+	}
+	if stats.AvgLatencyMs != 200 {
+		t.Errorf("daily avg latency = %v, want 200", stats.AvgLatencyMs)
+	}
+
+	models := map[string]int{}
+	for _, item := range stats.ByModel {
+		models[item.Model] = item.Count
+	}
+	if len(models) != 2 || models["Today-A"] != 2 || models["Today-B"] != 1 {
+		t.Errorf("daily models = %#v", models)
+	}
+	endpoints := map[string]int{}
+	for _, item := range stats.ByEndpoint {
+		endpoints[item.Endpoint] = item.Count
+	}
+	if len(endpoints) != 2 || endpoints["/today-a"] != 2 || endpoints["/today-b"] != 1 {
+		t.Errorf("daily endpoints = %#v", endpoints)
+	}
+
+	if stats.AllTime.TotalRequests != 6 || stats.AllTime.TotalInputTk != 300 || stats.AllTime.TotalOutputTk != 30 || stats.AllTime.ErrorCount != 1 {
+		t.Errorf("all-time = %+v, want all six records", stats.AllTime)
+	}
+
+	hourly := map[string]int{}
+	for _, item := range stats.Hourly {
+		hourly[item.Hour] = item.Count
+	}
+	if hourly["08-10 12"] != 1 || hourly["08-11 00"] != 1 || hourly["08-11 10"] != 1 {
+		t.Errorf("rolling hourly = %#v, want yesterday 12:00 and today's elapsed hours", hourly)
+	}
+	if _, exists := hourly["08-10 10"]; exists {
+		t.Errorf("rolling hourly includes record older than 24h: %#v", hourly)
+	}
+	if _, exists := hourly["08-11 23"]; exists {
+		t.Errorf("rolling hourly includes future same-day record: %#v", hourly)
+	}
+	if _, exists := hourly["08-12 00"]; exists {
+		t.Errorf("rolling hourly includes tomorrow record: %#v", hourly)
 	}
 }

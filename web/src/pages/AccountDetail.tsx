@@ -123,6 +123,34 @@ const AccountDetail: React.FC = () => {
   useEffect(() => { fetchData(); }, [decodedKey]);
   useEffect(() => { fetchModels(); }, [decodedKey]);
 
+  // Daily aggregates use the local calendar day. Refresh only the stats just
+  // after local midnight so an open page resets without reloading 500 log rows.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const scheduleMidnightRefresh = () => {
+      const now = new Date();
+      const nextMidnight = new Date(now);
+      nextMidnight.setHours(24, 0, 1, 0);
+      timer = setTimeout(async () => {
+        try {
+          const nextStats = await api.getAccountStats(decodedKey);
+          if (!cancelled) setStats(nextStats);
+        } catch {
+          // A manual refresh remains available if the midnight request fails.
+        }
+        if (!cancelled) scheduleMidnightRefresh();
+      }, Math.max(1000, nextMidnight.getTime() - now.getTime()));
+    };
+
+    scheduleMidnightRefresh();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [decodedKey]);
+
   // Poll active sessions every 5s
   useEffect(() => {
     const poll = async () => {
