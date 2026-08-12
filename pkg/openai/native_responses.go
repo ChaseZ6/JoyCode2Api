@@ -100,6 +100,14 @@ func (s *Server) handleNativeResponsesStream(w http.ResponseWriter, r *http.Requ
 	heartbeat := time.NewTicker(5 * time.Second)
 	defer heartbeat.Stop()
 	var inTk, outTk int
+	var hasUsage, usageCommitted bool
+	commitUsage := func() {
+		if hasUsage && !usageCommitted {
+			store.SetTokenUsage(r, inTk, outTk)
+			usageCommitted = true
+		}
+	}
+	defer commitUsage()
 	for {
 		select {
 		case <-r.Context().Done():
@@ -108,17 +116,20 @@ func (s *Server) handleNativeResponsesStream(w http.ResponseWriter, r *http.Requ
 			writeSSEHeartbeat(w, flusher)
 		case item, open := <-reads:
 			if !open {
-				if inTk > 0 || outTk > 0 {
-					store.SetTokenUsage(r, inTk, outTk)
-				}
 				return
 			}
 			if item.Err != nil {
 				writeSSEError(w, flusher, item.Err.Error(), "api_error", "upstream_error")
 				return
 			}
-			if item.InputTokens > 0 || item.OutputTokens > 0 {
+			if item.HasUsage {
 				inTk, outTk = item.InputTokens, item.OutputTokens
+				hasUsage = true
+			}
+			if item.Terminal {
+				// Commit before exposing the terminal event. Codex closes the HTTP
+				// stream as soon as it receives response.completed.
+				commitUsage()
 			}
 			fmt.Fprintf(w, "data: %s\n\n", item.Data)
 			flusher.Flush()
@@ -130,6 +141,8 @@ type nativeResponsesRead struct {
 	Data         string
 	InputTokens  int
 	OutputTokens int
+	HasUsage     bool
+	Terminal     bool
 	Err          error
 }
 
@@ -139,34 +152,73 @@ func readNativeResponsesSSE(body interface{ Read([]byte) (int, error) }) <-chan 
 		defer close(out)
 		scanner := bufio.NewScanner(body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			for strings.HasPrefix(line, "data: ") {
-				line = strings.TrimPrefix(line, "data: ")
+		var dataLines []string
+		emit := func() bool {
+			if len(dataLines) == 0 {
+				return true
 			}
-			line = strings.TrimSpace(line)
-			if line == "" || !strings.HasPrefix(line, "{") {
-				continue
+			data := strings.Join(dataLines, "\n")
+			dataLines = dataLines[:0]
+			for strings.HasPrefix(data, "data:") {
+				data = strings.TrimSpace(strings.TrimPrefix(data, "data:"))
+			}
+			if data == "" || data == "[DONE]" || !strings.HasPrefix(data, "{") {
+				return true
 			}
 			var raw map[string]interface{}
-			decoder := json.NewDecoder(strings.NewReader(line))
+			decoder := json.NewDecoder(strings.NewReader(data))
 			decoder.UseNumber()
 			if err := decoder.Decode(&raw); err != nil {
 				out <- nativeResponsesRead{Err: fmt.Errorf("invalid Responses SSE event: %w", err)}
-				return
+				return false
 			}
 			if err := joycode.DetectBusinessError(raw); err != nil {
 				out <- nativeResponsesRead{Err: err}
-				return
+				return false
 			}
-			item := nativeResponsesRead{Data: line}
+			item := nativeResponsesRead{Data: data}
+			eventType, _ := raw["type"].(string)
+			switch eventType {
+			case "response.completed", "response.incomplete", "response.failed":
+				item.Terminal = true
+			}
 			if response, ok := raw["response"].(map[string]interface{}); ok {
 				if usage, ok := response["usage"].(map[string]interface{}); ok {
 					item.InputTokens = intFromJSON(usage["input_tokens"])
 					item.OutputTokens = intFromJSON(usage["output_tokens"])
+					item.HasUsage = true
+				}
+			}
+			if !item.HasUsage {
+				if usage, ok := raw["usage"].(map[string]interface{}); ok {
+					item.InputTokens = intFromJSON(usage["input_tokens"])
+					item.OutputTokens = intFromJSON(usage["output_tokens"])
+					item.HasUsage = true
 				}
 			}
 			out <- item
+			return true
+		}
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.TrimSpace(line) == "" {
+				if !emit() {
+					return
+				}
+				continue
+			}
+			trimmed := strings.TrimLeft(line, " \t")
+			if strings.HasPrefix(trimmed, ":") || strings.HasPrefix(trimmed, "event:") ||
+				strings.HasPrefix(trimmed, "id:") || strings.HasPrefix(trimmed, "retry:") {
+				continue
+			}
+			if strings.HasPrefix(trimmed, "data:") {
+				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+			}
+		}
+		if !emit() {
+			return
 		}
 		if err := scanner.Err(); err != nil {
 			out <- nativeResponsesRead{Err: fmt.Errorf("read Responses SSE: %w", err)}

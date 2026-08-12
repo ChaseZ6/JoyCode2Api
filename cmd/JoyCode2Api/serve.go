@@ -392,7 +392,7 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 		}
 
 		// Record session activity for /v1/ proxy requests
-		if strings.HasPrefix(r.URL.Path, "/v1/") && resolvedAccount != nil {
+		if isProxyInferencePath(r.URL.Path) && resolvedAccount != nil {
 			if sessionID == "" {
 				sessionID = r.RemoteAddr // fallback: unique per client IP
 			}
@@ -405,7 +405,7 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 		// Log /v1/ requests (skip GET /v1/models — it's a lightweight list
 		// endpoint with no model/tokens and would pollute stats with empty rows).
 		path := r.URL.Path
-		if strings.HasPrefix(path, "/v1/") && !(r.Method == http.MethodGet && path == "/v1/models") {
+		if isProxyInferencePath(path) && !(r.Method == http.MethodGet && path == "/v1/models") {
 			apiKey := extractAPIKey(r)
 			if apiKey != "" {
 				if account, _ := s.GetAccountByToken(apiKey); account != nil {
@@ -480,6 +480,10 @@ func (rw *responseWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func isProxyInferencePath(path string) bool {
+	return strings.HasPrefix(path, "/v1/") || path == "/responses"
 }
 
 // extractAPIKey pulls the caller's API key from either the x-api-key header
