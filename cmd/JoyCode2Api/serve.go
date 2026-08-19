@@ -340,6 +340,7 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 		r = store.InitTokenUsage(r)
 		r = store.InitModel(r)
 		r = store.InitAccountModel(r)
+		r = store.InitRequestOutcome(r)
 
 		// Assign request ID for log correlation
 		reqID := atomic.AddUint64(&requestCounter, 1)
@@ -421,15 +422,27 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 			isStream := bodyStream || r.URL.Query().Get("stream") != ""
 			latency := time.Since(start).Milliseconds()
 
+			loggedStatus := rw.statusCode
 			var errMsg string
-			if rw.statusCode >= 400 {
+			outcome := store.GetRequestOutcome(r)
+			if outcome.Error != "" {
+				loggedStatus = outcome.StatusCode
+				if loggedStatus == 0 {
+					loggedStatus = http.StatusBadGateway
+				}
+				errMsg = outcome.Error
+			}
+			if rw.statusCode >= 400 && errMsg == "" {
 				errMsg = fmt.Sprintf("HTTP %d on %s %s", rw.statusCode, r.Method, path)
 				if body := strings.TrimSpace(rw.body.String()); body != "" {
 					errMsg = fmt.Sprintf("%s\n%s", errMsg, body)
 				}
+			}
+			if errMsg != "" {
 				slog.Error("proxy error response",
 					"request_id", reqID,
-					"status", rw.statusCode,
+					"status", loggedStatus,
+					"http_status", rw.statusCode,
 					"method", r.Method,
 					"path", path,
 					"model", model,
@@ -446,7 +459,7 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 				model = resolvedModel
 			}
 			if s.GetSetting("enable_request_logging") != "false" {
-				go s.LogRequest(apiKey, model, path, isStream, rw.statusCode, latency, errMsg, inTk, outTk)
+				go s.LogRequest(apiKey, model, path, isStream, loggedStatus, latency, errMsg, inTk, outTk)
 			}
 		}
 	})

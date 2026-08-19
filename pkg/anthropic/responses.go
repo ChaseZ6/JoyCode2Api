@@ -359,10 +359,11 @@ func responsesErrorMessage(v interface{}) string {
 
 // responsesStreamEvent is the subset of Responses SSE payloads we consume.
 type responsesStreamEvent struct {
-	Type      string `json:"type"`
-	Delta     string `json:"delta"`
-	ItemID    string `json:"item_id"`
-	OutputIdx int    `json:"output_index"`
+	Type      string      `json:"type"`
+	Delta     string      `json:"delta"`
+	ItemID    string      `json:"item_id"`
+	OutputIdx int         `json:"output_index"`
+	Error     interface{} `json:"error"`
 	Item      struct {
 		Type   string `json:"type"`
 		Name   string `json:"name"`
@@ -370,7 +371,8 @@ type responsesStreamEvent struct {
 		Args   string `json:"arguments"`
 	} `json:"item"`
 	Response struct {
-		ID    string `json:"id"`
+		ID    string      `json:"id"`
+		Error interface{} `json:"error"`
 		Usage *struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
@@ -420,11 +422,30 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 			continue
 		}
 		st.handleEvent(&ev)
+		if st.streamError != "" {
+			st.closeText()
+			st.closeTool()
+			store.SetRequestError(r, http.StatusBadGateway, "upstream_error: "+st.streamError)
+			reqLog(r).Error("responses stream upstream failure", "type", st.terminal, "error", st.streamError)
+			writeStreamError(w, flusher, st.streamError)
+			return
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		reqLog(r).Error("responses stream read error", "error", err)
-		st.finish("end_turn")
+		st.closeText()
+		st.closeTool()
+		store.SetRequestError(r, http.StatusBadGateway, "stream_read_error: "+err.Error())
 		writeStreamError(w, flusher, "读取上游流式响应失败，本次回复可能不完整，请重试。原始错误: "+err.Error())
+		return
+	}
+	if !st.sawTerminal {
+		st.closeText()
+		st.closeTool()
+		message := "上游 Responses 流在返回结束标记前断开，本次回复可能不完整，请重试。"
+		store.SetRequestError(r, http.StatusBadGateway, "stream_truncated: upstream closed before terminal event")
+		reqLog(r).Warn("responses stream closed before terminal event", "blocks", st.nextIndex)
+		writeStreamError(w, flusher, message)
 		return
 	}
 
@@ -443,15 +464,18 @@ type responsesStreamState struct {
 	msgID        string
 	displayModel string
 
-	nextIndex  int
-	textOpen   bool
-	textIndex  int
-	toolOpen   bool
-	toolIndex  int
-	stopReason string
-	finished   bool
-	inTokens   int
-	outTokens  int
+	nextIndex   int
+	textOpen    bool
+	textIndex   int
+	toolOpen    bool
+	toolIndex   int
+	stopReason  string
+	finished    bool
+	sawTerminal bool
+	terminal    string
+	streamError string
+	inTokens    int
+	outTokens   int
 }
 
 func (s *responsesStreamState) send(event string, payload interface{}) {
@@ -533,13 +557,44 @@ func (s *responsesStreamState) handleEvent(ev *responsesStreamEvent) {
 			s.closeTool()
 		}
 
-	case "response.completed", "response.incomplete", "response.failed":
+	case "response.completed":
 		if u := ev.Response.Usage; u != nil {
 			s.inTokens = u.InputTokens
 			s.outTokens = u.OutputTokens
 		}
-		if d := ev.Response.IncompleteDetails; d != nil && d.Reason == "max_output_tokens" {
+		s.sawTerminal = true
+		s.terminal = ev.Type
+
+	case "response.incomplete":
+		if u := ev.Response.Usage; u != nil {
+			s.inTokens = u.InputTokens
+			s.outTokens = u.OutputTokens
+		}
+		s.terminal = ev.Type
+		reason := ""
+		if d := ev.Response.IncompleteDetails; d != nil {
+			reason = d.Reason
+		}
+		if reason == "max_output_tokens" {
 			s.stopReason = "max_tokens"
+			s.sawTerminal = true
+		} else {
+			s.streamError = "upstream response incomplete: " + reason
+		}
+
+	case "response.failed", "error":
+		if u := ev.Response.Usage; u != nil {
+			s.inTokens = u.InputTokens
+			s.outTokens = u.OutputTokens
+		}
+		s.terminal = ev.Type
+		errValue := ev.Response.Error
+		if ev.Type == "error" {
+			errValue = ev.Error
+		}
+		s.streamError = responsesErrorMessage(errValue)
+		if s.streamError == "" || s.streamError == "null" {
+			s.streamError = "upstream response failed"
 		}
 	}
 }

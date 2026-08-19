@@ -91,8 +91,11 @@ func upstreamHTTPStatus(err error) int {
 	}
 	var upstream *joycode.UpstreamError
 	if errors.As(err, &upstream) {
-		combined := upstream.Message + " " + upstream.Cause
-		if strings.Contains(strings.ToLower(combined), "context") || upstream.Code == "400" {
+		combined := strings.ToLower(upstream.Code + " " + upstream.Message + " " + upstream.Cause)
+		if strings.Contains(combined, "rate_limit") || strings.Contains(combined, "rate limit") || upstream.Code == "429" {
+			return http.StatusTooManyRequests
+		}
+		if strings.Contains(combined, "context") || upstream.Code == "400" {
 			return http.StatusBadRequest
 		}
 	}

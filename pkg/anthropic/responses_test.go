@@ -2,11 +2,14 @@ package anthropic
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
 
 func solModel() joycode.ModelInfo {
@@ -331,5 +334,54 @@ func TestResponsesStream_IncompleteMapsToMaxTokens(t *testing.T) {
 	})
 	if !strings.Contains(out, `"stop_reason":"max_tokens"`) {
 		t.Errorf("expected stop_reason=max_tokens:\n%s", out)
+	}
+}
+
+func runGPTResponsesHandlerStream(t *testing.T, sse string) (string, store.RequestOutcome) {
+	t.Helper()
+	joycode.DefaultRegistry.Seed([]joycode.ModelInfo{solModel()})
+	t.Cleanup(func() { joycode.DefaultRegistry.Seed(joycode.StaticModels()) })
+	client := joycode.NewClient("pt-test", "user-test")
+	client.SetHTTPClient(&http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sse))}, nil
+	})})
+	handler := NewHandler(client, nil)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"GPT-5.6 Sol","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = store.InitTokenUsage(req)
+	req = store.InitRequestOutcome(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec.Body.String(), store.GetRequestOutcome(req)
+}
+
+func TestResponsesHandlerStream_PrematureEOFSurfacesError(t *testing.T) {
+	out, outcome := runGPTResponsesHandlerStream(t,
+		`data: {"type":"response.output_text.delta","delta":"partial"}`+"\n\n")
+	if !strings.Contains(out, `"type":"error"`) || !strings.Contains(out, "结束标记前断开") {
+		t.Errorf("missing Anthropic stream error:\n%s", out)
+	}
+	if strings.Contains(out, "event: message_stop") || strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Errorf("premature EOF must not fake message_stop/end_turn:\n%s", out)
+	}
+	if outcome.StatusCode != http.StatusBadGateway || !strings.Contains(outcome.Error, "stream_truncated") {
+		t.Errorf("outcome = %+v", outcome)
+	}
+}
+
+func TestResponsesHandlerStream_FailedEventSurfacesError(t *testing.T) {
+	out, outcome := runGPTResponsesHandlerStream(t,
+		`data: {"type":"response.failed","response":{"error":{"message":"model unavailable"}}}`+"\n\n")
+	if !strings.Contains(out, `"type":"error"`) || !strings.Contains(out, "model unavailable") {
+		t.Errorf("missing failed event error:\n%s", out)
+	}
+	if strings.Contains(out, "event: message_stop") {
+		t.Errorf("failed event must not emit message_stop:\n%s", out)
+	}
+	if outcome.StatusCode != http.StatusBadGateway || !strings.Contains(outcome.Error, "upstream_error") {
+		t.Errorf("outcome = %+v", outcome)
 	}
 }

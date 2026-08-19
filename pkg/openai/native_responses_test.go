@@ -178,3 +178,96 @@ func TestNativeResponses_StreamStoresUsage(t *testing.T) {
 		t.Fatalf("usage = %d/%d, want 31/10; body=%s", inTk, outTk, rec.Body.String())
 	}
 }
+
+func TestNativeResponses_PrematureEOFSurfacesError(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{gptSolModel()})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"type":"response.created","response":{"id":"resp_1"}}`+"\n\n")
+		io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"partial"}`+"\n\n")
+		w.(http.Flusher).Flush()
+		// Clean EOF without response.completed/incomplete/failed.
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"gpt-5.6-sol","input":"hello","stream":true}`))
+	req = store.InitTokenUsage(req)
+	req = store.InitRequestOutcome(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	out := rec.Body.String()
+	if !strings.Contains(out, `"code":"stream_truncated"`) {
+		t.Errorf("missing stream_truncated error:\n%s", out)
+	}
+	if strings.Contains(out, `"type":"response.completed"`) || strings.Contains(out, "data: [DONE]") {
+		t.Errorf("premature EOF must not fake completion:\n%s", out)
+	}
+	outcome := store.GetRequestOutcome(req)
+	if outcome.StatusCode != http.StatusBadGateway || !strings.Contains(outcome.Error, "stream_truncated") {
+		t.Errorf("outcome = %+v", outcome)
+	}
+}
+
+func TestNativeResponses_FailedEventSurfacesError(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{gptSolModel()})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"type":"response.failed","response":{"error":{"message":"model unavailable"},"usage":{"input_tokens":9,"output_tokens":0}}}`+"\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(
+		`{"model":"gpt-5.6-sol","input":"hello","stream":true}`))
+	req = store.InitTokenUsage(req)
+	req = store.InitRequestOutcome(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	out := rec.Body.String()
+	if !strings.Contains(out, "model unavailable") || !strings.Contains(out, `"code":"upstream_error"`) {
+		t.Errorf("missing failed event error:\n%s", out)
+	}
+	if strings.Contains(out, `"type":"response.failed"`) {
+		t.Errorf("failed event must be translated to error, not passed as success:\n%s", out)
+	}
+	inTk, outTk := store.GetTokenUsage(req)
+	if inTk != 9 || outTk != 0 {
+		t.Errorf("usage = %d/%d", inTk, outTk)
+	}
+	if outcome := store.GetRequestOutcome(req); outcome.StatusCode != http.StatusBadGateway {
+		t.Errorf("outcome = %+v", outcome)
+	}
+}
+
+func TestNativeResponses_RateLimitEventIsClassified(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{gptSolModel()})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"type":"error","error":{"code":"rate_limit_exceeded","message":"rate limit exceeded"}}`+"\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(
+		`{"model":"gpt-5.6-sol","input":"hello","stream":true}`))
+	req = store.InitRequestOutcome(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"code":"rate_limit_error"`) {
+		t.Errorf("missing rate_limit_error:\n%s", rec.Body.String())
+	}
+	outcome := store.GetRequestOutcome(req)
+	if outcome.StatusCode != http.StatusTooManyRequests || !strings.Contains(outcome.Error, "rate_limit_error") {
+		t.Errorf("outcome = %+v", outcome)
+	}
+}

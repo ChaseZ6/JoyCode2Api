@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -100,7 +101,9 @@ func (s *Server) handleNativeResponsesStream(w http.ResponseWriter, r *http.Requ
 	heartbeat := time.NewTicker(5 * time.Second)
 	defer heartbeat.Stop()
 	var inTk, outTk int
-	var hasUsage, usageCommitted bool
+	var hasUsage, usageCommitted, sawTerminal bool
+	eventCount := 0
+	terminalType := ""
 	commitUsage := func() {
 		if hasUsage && !usageCommitted {
 			store.SetTokenUsage(r, inTk, outTk)
@@ -111,25 +114,66 @@ func (s *Server) handleNativeResponsesStream(w http.ResponseWriter, r *http.Requ
 	for {
 		select {
 		case <-r.Context().Done():
+			slog.Info("native responses stream client cancelled",
+				"events", eventCount, "terminal", terminalType, "in", inTk, "out", outTk)
 			return
 		case <-heartbeat.C:
 			writeSSEHeartbeat(w, flusher)
 		case item, open := <-reads:
 			if !open {
+				if !sawTerminal {
+					message := "upstream Responses stream closed before a terminal event"
+					store.SetRequestError(r, http.StatusBadGateway, "stream_truncated: "+message)
+					slog.Warn("native responses stream truncated",
+						"events", eventCount, "in", inTk, "out", outTk)
+					writeSSEError(w, flusher, message, "api_error", "stream_truncated")
+				}
 				return
 			}
 			if item.Err != nil {
-				writeSSEError(w, flusher, item.Err.Error(), "api_error", "upstream_error")
+				status := upstreamHTTPStatus(item.Err)
+				code := "stream_read_error"
+				if status == http.StatusTooManyRequests {
+					code = "rate_limit_error"
+				} else if _, ok := item.Err.(*joycode.UpstreamError); ok {
+					code = "upstream_error"
+				}
+				store.SetRequestError(r, status, code+": "+item.Err.Error())
+				slog.Error("native responses stream read error", "error", item.Err, "events", eventCount, "status", status)
+				writeSSEError(w, flusher, item.Err.Error(), "api_error", code)
 				return
 			}
+			eventCount++
 			if item.HasUsage {
 				inTk, outTk = item.InputTokens, item.OutputTokens
 				hasUsage = true
 			}
 			if item.Terminal {
-				// Commit before exposing the terminal event. Codex closes the HTTP
-				// stream as soon as it receives response.completed.
-				commitUsage()
+				terminalType = item.EventType
+				switch item.EventType {
+				case "response.completed":
+					sawTerminal = true
+				case "response.incomplete":
+					if item.IncompleteReason == "max_output_tokens" {
+						sawTerminal = true
+					} else {
+						message := "upstream response incomplete: " + item.IncompleteReason
+						store.SetRequestError(r, http.StatusBadGateway, "response_incomplete: "+message)
+						writeSSEError(w, flusher, message, "api_error", "response_incomplete")
+						return
+					}
+				case "response.failed", "error":
+					message := item.FailureMessage
+					if message == "" || message == "null" {
+						message = "upstream response failed"
+					}
+					store.SetRequestError(r, http.StatusBadGateway, "upstream_error: "+message)
+					writeSSEError(w, flusher, message, "api_error", "upstream_error")
+					return
+				}
+				if sawTerminal {
+					commitUsage()
+				}
 			}
 			fmt.Fprintf(w, "data: %s\n\n", item.Data)
 			flusher.Flush()
@@ -138,12 +182,15 @@ func (s *Server) handleNativeResponsesStream(w http.ResponseWriter, r *http.Requ
 }
 
 type nativeResponsesRead struct {
-	Data         string
-	InputTokens  int
-	OutputTokens int
-	HasUsage     bool
-	Terminal     bool
-	Err          error
+	Data             string
+	EventType        string
+	IncompleteReason string
+	FailureMessage   string
+	InputTokens      int
+	OutputTokens     int
+	HasUsage         bool
+	Terminal         bool
+	Err              error
 }
 
 func readNativeResponsesSSE(body interface{ Read([]byte) (int, error) }) <-chan nativeResponsesRead {
@@ -178,8 +225,9 @@ func readNativeResponsesSSE(body interface{ Read([]byte) (int, error) }) <-chan 
 			}
 			item := nativeResponsesRead{Data: data}
 			eventType, _ := raw["type"].(string)
+			item.EventType = eventType
 			switch eventType {
-			case "response.completed", "response.incomplete", "response.failed":
+			case "response.completed", "response.incomplete", "response.failed", "error":
 				item.Terminal = true
 			}
 			if response, ok := raw["response"].(map[string]interface{}); ok {
@@ -188,6 +236,15 @@ func readNativeResponsesSSE(body interface{ Read([]byte) (int, error) }) <-chan 
 					item.OutputTokens = intFromJSON(usage["output_tokens"])
 					item.HasUsage = true
 				}
+				if details, ok := response["incomplete_details"].(map[string]interface{}); ok {
+					item.IncompleteReason, _ = details["reason"].(string)
+				}
+				if responseErr := response["error"]; responseErr != nil {
+					item.FailureMessage = responseErrorMessage(responseErr)
+				}
+			}
+			if eventType == "error" && item.FailureMessage == "" {
+				item.FailureMessage = responseErrorMessage(raw["error"])
 			}
 			if !item.HasUsage {
 				if usage, ok := raw["usage"].(map[string]interface{}); ok {

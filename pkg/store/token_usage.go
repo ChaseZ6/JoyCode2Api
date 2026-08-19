@@ -11,6 +11,16 @@ type modelCtxKey struct{}
 
 type accountModelCtxKey struct{}
 
+type requestOutcomeCtxKey struct{}
+
+// RequestOutcome records an internal proxy failure after streaming headers were
+// already committed. It affects request logging, not the HTTP status already
+// observed by the client.
+type RequestOutcome struct {
+	StatusCode int
+	Error      string
+}
+
 // InitTokenUsage initializes token usage tracking in the request context.
 // Returns a pointer that handlers can update with SetTokenUsage.
 func InitTokenUsage(r *http.Request) *http.Request {
@@ -32,6 +42,27 @@ func GetTokenUsage(r *http.Request) (int, int) {
 		return usage[0], usage[1]
 	}
 	return 0, 0
+}
+
+func InitRequestOutcome(r *http.Request) *http.Request {
+	outcome := new(RequestOutcome)
+	return r.WithContext(context.WithValue(r.Context(), requestOutcomeCtxKey{}, outcome))
+}
+
+// SetRequestError preserves the first internal failure, which is usually the
+// most specific root cause. Later cleanup errors must not overwrite it.
+func SetRequestError(r *http.Request, statusCode int, message string) {
+	if outcome, ok := r.Context().Value(requestOutcomeCtxKey{}).(*RequestOutcome); ok && outcome.Error == "" {
+		outcome.StatusCode = statusCode
+		outcome.Error = message
+	}
+}
+
+func GetRequestOutcome(r *http.Request) RequestOutcome {
+	if outcome, ok := r.Context().Value(requestOutcomeCtxKey{}).(*RequestOutcome); ok {
+		return *outcome
+	}
+	return RequestOutcome{}
 }
 
 // SetModel stores the resolved (translated) model name in the request context.
