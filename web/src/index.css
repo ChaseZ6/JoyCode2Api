@@ -567,6 +567,25 @@ code, pre, .ant-typography code, .jc-mono {
   color: var(--jc-accent);
 }
 
+.jc-log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.jc-log-search {
+  width: min(440px, 100%);
+}
+
+.jc-log-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
 /* Auth pages (Login/Setup/ForgotPassword) — dark gradient backdrop */
 .jc-auth-bg {
   min-height: 100vh;
@@ -688,6 +707,19 @@ code, pre, .ant-typography code, .jc-mono {
   .ant-pagination {
     flex-wrap: wrap;
     gap: 8px;
+  }
+
+  .jc-log-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .jc-log-search {
+    width: 100%;
+  }
+
+  .jc-log-toolbar .ant-segmented {
+    align-self: flex-start;
   }
 }
 

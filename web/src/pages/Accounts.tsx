@@ -33,6 +33,7 @@ import QRLoginModal from '../components/QRLoginModal';
 import { useNavigate } from 'react-router-dom';
 import { api, accountDisplayName } from '../api';
 import type { Account } from '../api';
+import { writeClipboardText } from '../utils/clipboard';
 
 const BUILTIN_MODELS = [
   { label: 'JoyAI-Code（推荐）', value: 'JoyAI-Code' },
@@ -85,20 +86,10 @@ const codexCmd = (apiKey: string, model = 'GLM-5.1') => [
 
 const copyToClipboard = async (text: string, label: string) => {
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.cssText = 'position:fixed;left:-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-    }
+    await writeClipboardText(text);
     message.success(`${label} 命令已复制`);
   } catch {
-    message.error('复制失败');
+    message.error('复制失败，请检查浏览器剪贴板权限');
   }
 };
 

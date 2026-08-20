@@ -774,3 +774,60 @@ func TestGetAccountLogsPageFiltersAndTotal(t *testing.T) {
 		t.Fatal("expected invalid kind error")
 	}
 }
+
+func TestGetAccountLogsPageSearch(t *testing.T) {
+	s := openTestStore(t)
+	entries := []struct {
+		userID, model, endpoint, errorMessage string
+		stream                                bool
+		status                                int
+	}{
+		{"u", "Claude-Opus", "/v1/messages", "", true, 200},
+		{"u", "GPT-5.6 Sol", "/responses", "upstream TIMEOUT while reading", true, 502},
+		{"u", "rate%limit", "/literal/percent", "", false, 200},
+		{"u", "rateXlimit", "/control/percent", "", false, 200},
+		{"u", "foo_bar", "/literal/underscore", "", false, 200},
+		{"u", "fooXbar", "/control/underscore", "", false, 200},
+		{"u", `path\model`, "/literal/backslash", "", false, 200},
+		{"other", "GPT-5.6 Sol", "/responses", "upstream timeout", true, 502},
+	}
+	for _, entry := range entries {
+		if err := s.LogRequest(entry.userID, entry.model, entry.endpoint, entry.stream, entry.status, 1, entry.errorMessage, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		query LogQuery
+		want  int
+	}{
+		{name: "model is ASCII case insensitive", query: LogQuery{Q: "claude-opus"}, want: 1},
+		{name: "endpoint contains text", query: LogQuery{Q: "MESSAGES"}, want: 1},
+		{name: "error combines with kind", query: LogQuery{Kind: "error", Q: "timeout"}, want: 1},
+		{name: "percent is literal", query: LogQuery{Q: "%"}, want: 1},
+		{name: "underscore is literal", query: LogQuery{Q: "_"}, want: 1},
+		{name: "backslash is literal", query: LogQuery{Q: `\`}, want: 1},
+		{name: "whitespace is ignored", query: LogQuery{Q: "   "}, want: 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.query.Limit = 20
+			logs, total, err := s.GetAccountLogsPage("u", tt.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if total != tt.want || len(logs) != tt.want {
+				t.Fatalf("total=%d len=%d, want %d; logs=%+v", total, len(logs), tt.want, logs)
+			}
+		})
+	}
+
+	logs, total, err := s.GetAccountLogsPage("u", LogQuery{Limit: 1, Offset: 0, Kind: "error", Q: " timeout "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(logs) != 1 || logs[0].ErrorMessage != "upstream TIMEOUT while reading" {
+		t.Fatalf("search pagination mismatch: total=%d logs=%+v", total, logs)
+	}
+}

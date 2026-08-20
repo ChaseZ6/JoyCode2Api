@@ -667,6 +667,61 @@ func TestHandleAccountLogsPagination(t *testing.T) {
 	}
 }
 
+func TestHandleAccountLogsSearch(t *testing.T) {
+	h, s := setupTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	for _, entry := range []struct {
+		userID, model, endpoint, errorMessage string
+		status                                int
+	}{
+		{"key1", "GPT-5.6 Sol", "/responses", "upstream timeout one", 502},
+		{"key1", "GPT-5.6 Sol", "/responses", "upstream timeout two", 503},
+		{"key1", "Claude-Opus", "/v1/messages", "", 200},
+		{"key2", "GPT-5.6 Sol", "/responses", "upstream timeout other account", 502},
+	} {
+		if err := s.LogRequest(entry.userID, entry.model, entry.endpoint, true, entry.status, 1, entry.errorMessage, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/key1/logs?limit=1&offset=0&kind=error&q=%20TIMEOUT%20", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeJSON(t, rec)
+	if body["total"] != float64(2) || body["has_more"] != true || len(body["logs"].([]interface{})) != 1 {
+		t.Fatalf("body=%v", body)
+	}
+}
+
+func TestHandleAccountLogsSearchValidation(t *testing.T) {
+	h, _ := setupTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	for _, tt := range []struct {
+		name, rawQuery string
+		wantStatus     int
+	}{
+		{name: "200 Unicode characters", rawQuery: "q=" + strings.Repeat("界", 200), wantStatus: http.StatusOK},
+		{name: "201 Unicode characters", rawQuery: "q=" + strings.Repeat("界", 201), wantStatus: http.StatusBadRequest},
+		{name: "invalid UTF-8", rawQuery: "q=%FF", wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/accounts/key1/logs", nil)
+			req.URL.RawQuery = tt.rawQuery
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status=%d, want %d, body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleHealthAccountSemantics(t *testing.T) {
 	h, s := setupTestHandler(t)
 	mux := http.NewServeMux()

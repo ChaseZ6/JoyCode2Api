@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  Card, Row, Col, Statistic, Typography, Skeleton, Tag, Select, Button,
+  Card, Row, Col, Statistic, Typography, Skeleton, Tag, Select, Button, Input,
   message, Space, Table, Badge, Segmented, Popconfirm, Tooltip, Divider,
 } from 'antd';
 import type { TableColumnsType } from 'antd';
@@ -9,7 +9,7 @@ import {
   CheckCircleOutlined, ReloadOutlined,
   ClockCircleOutlined, GlobalOutlined, FireOutlined,
   DeleteOutlined, QuestionCircleOutlined, InfoCircleOutlined,
-  CloseCircleOutlined, SwapOutlined,
+  CloseCircleOutlined, SwapOutlined, CopyOutlined,
 } from '@ant-design/icons';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip,
@@ -18,6 +18,7 @@ import {
 import { useParams, useNavigate } from 'react-router-dom';
 import { api, accountDisplayName } from '../api';
 import type { Account, AccountStats, ModelInfo, RequestLog } from '../api';
+import { writeClipboardText } from '../utils/clipboard';
 
 // Offline fallback only. The selector is normally populated from
 // /api/accounts/:id/models, which reflects what the account can actually use.
@@ -75,6 +76,33 @@ const formatLatency = (ms: number) => {
   return `${m}m${remainS > 0 ? ` ${remainS}s` : ''}`;
 };
 
+interface LogDetailField {
+  label: string;
+  value: string;
+}
+
+const getLogDetailFields = (record: RequestLog): LogDetailField[] => [
+  { label: '请求 ID', value: String(record.id) },
+  { label: '时间', value: formatTime(record.created_at) },
+  { label: '端点', value: record.endpoint },
+  { label: '模型', value: record.model || '-' },
+  { label: '流式', value: record.stream ? '是' : '否' },
+  { label: '状态', value: String(record.status_code) },
+  { label: '输入 / 输出 Token', value: `${record.input_tokens || 0} / ${record.output_tokens || 0}` },
+  { label: '延迟', value: `${formatLatency(record.latency_ms)} (${record.latency_ms}ms)` },
+];
+
+const formatLogDetails = (record: RequestLog) => {
+  const lines = [
+    'JoyCode2Api 请求日志',
+    ...getLogDetailFields(record).map(({ label, value }) => `${label}: ${value}`),
+  ];
+  if (record.error_message || record.status_code >= 400) {
+    lines.push('错误详情:', record.error_message || `HTTP ${record.status_code}`);
+  }
+  return lines.join('\n');
+};
+
 const AccountDetail: React.FC = () => {
   const { userId } = useParams<{ userId: string }>();
   const navigate = useNavigate();
@@ -86,10 +114,13 @@ const AccountDetail: React.FC = () => {
   const [modelLoading, setModelLoading] = useState(false);
   const [savingModel, setSavingModel] = useState(false);
   const [logFilter, setLogFilter] = useState<'all' | 'stream' | 'error'>('all');
+  const [logSearchInput, setLogSearchInput] = useState('');
+  const [logSearch, setLogSearch] = useState('');
   const [logPage, setLogPage] = useState(1);
   const [logPageSize, setLogPageSize] = useState(20);
   const [logTotal, setLogTotal] = useState(0);
   const [logLoading, setLogLoading] = useState(false);
+  const logRequestSeq = useRef(0);
   const [activeSessions, setActiveSessions] = useState(0);
 
   const decodedKey = userId ? decodeURIComponent(userId) : '';
@@ -124,23 +155,44 @@ const AccountDetail: React.FC = () => {
   };
 
   const fetchLogs = async () => {
+    const requestSeq = ++logRequestSeq.current;
     setLogLoading(true);
     try {
       const data = await api.getAccountLogs(decodedKey, {
         limit: logPageSize, offset: (logPage - 1) * logPageSize, kind: logFilter,
+        q: logSearch || undefined,
       });
+      if (requestSeq !== logRequestSeq.current) return;
       setLogs(data.logs || []);
       setLogTotal(data.total);
     } catch (e: unknown) {
-      message.error(e instanceof Error ? e.message : '请求日志加载失败');
+      if (requestSeq === logRequestSeq.current) {
+        message.error(e instanceof Error ? e.message : '请求日志加载失败');
+      }
     } finally {
-      setLogLoading(false);
+      if (requestSeq === logRequestSeq.current) setLogLoading(false);
+    }
+  };
+
+  const handleLogSearch = (value: string) => {
+    const search = value.trim();
+    setLogSearchInput(search);
+    setLogPage(1);
+    setLogSearch(search);
+  };
+
+  const handleCopyLog = async (record: RequestLog) => {
+    try {
+      await writeClipboardText(formatLogDetails(record));
+      message.success('日志详情已复制到剪贴板');
+    } catch {
+      message.error('复制失败，请检查浏览器剪贴板权限');
     }
   };
 
   useEffect(() => { fetchData(); }, [decodedKey]);
   useEffect(() => { fetchModels(); }, [decodedKey]);
-  useEffect(() => { fetchLogs(); }, [decodedKey, logPage, logPageSize, logFilter]);
+  useEffect(() => { fetchLogs(); }, [decodedKey, logPage, logPageSize, logFilter, logSearch]);
 
   // Daily aggregates use the local calendar day. Refresh only the stats just
   // after local midnight so an open page resets without reloading 500 log rows.
@@ -376,7 +428,7 @@ const AccountDetail: React.FC = () => {
           }}>
             重置 Token
           </Button>
-          <Button size="small" icon={<ReloadOutlined />} onClick={() => { fetchData(); fetchModels(); }}>
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => { fetchData(); fetchModels(); fetchLogs(); }}>
             刷新
           </Button>
           <Popconfirm
@@ -668,10 +720,28 @@ const AccountDetail: React.FC = () => {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <ClockCircleOutlined style={{ color: '#22C55E' }} />
             <span>请求日志</span>
-            <Tag>{logs.length} 条</Tag>
+            <Tag>{logTotal} 条</Tag>
           </div>
         }
-        extra={
+      >
+        <div className="jc-log-toolbar">
+          <Input.Search
+            className="jc-log-search"
+            value={logSearchInput}
+            placeholder="搜索模型、端点或错误信息"
+            allowClear
+            maxLength={200}
+            enterButton="搜索"
+            onChange={(event) => {
+              const value = event.target.value;
+              setLogSearchInput(value);
+              if (!value && logSearch) {
+                setLogPage(1);
+                setLogSearch('');
+              }
+            }}
+            onSearch={handleLogSearch}
+          />
           <Segmented
             size="small"
             value={logFilter}
@@ -682,8 +752,7 @@ const AccountDetail: React.FC = () => {
               { label: '错误', value: 'error' },
             ]}
           />
-        }
-      >
+        </div>
         <Table
           dataSource={logs}
           columns={logColumns}
@@ -694,13 +763,24 @@ const AccountDetail: React.FC = () => {
             current: logPage, pageSize: logPageSize, total: logTotal,
             showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100],
             showTotal: (t) => `共 ${t} 条`,
-            onChange: (page, size) => { setLogPage(page); setLogPageSize(size); },
+            onChange: (page, size) => {
+              setLogPage(size === logPageSize ? page : 1);
+              setLogPageSize(size);
+            },
           }}
           scroll={{ x: 980 }}
-          locale={{ emptyText: '暂无请求记录' }}
+          locale={{ emptyText: logSearch || logFilter !== 'all' ? '没有匹配的请求日志' : '暂无请求记录' }}
           expandable={{
             expandedRowRender: (record) => (
               <div style={{ padding: '8px 0 8px 12px' }}>
+                <div className="jc-log-detail-header">
+                  <Typography.Text strong>日志详情</Typography.Text>
+                  <Tooltip title="复制完整请求详情">
+                    <Button size="small" icon={<CopyOutlined />} onClick={() => handleCopyLog(record)}>
+                      复制详情
+                    </Button>
+                  </Tooltip>
+                </div>
                 {record.status_code >= 400 && (
                   <div style={{
                     marginBottom: 10,
@@ -731,22 +811,12 @@ const AccountDetail: React.FC = () => {
                   gap: '6px 12px',
                   fontSize: 12,
                 }}>
-                  <Typography.Text type="secondary">请求 ID</Typography.Text>
-                  <Typography.Text code>{record.id}</Typography.Text>
-                  <Typography.Text type="secondary">时间</Typography.Text>
-                  <Typography.Text>{formatTime(record.created_at)}</Typography.Text>
-                  <Typography.Text type="secondary">端点</Typography.Text>
-                  <Typography.Text code>{record.endpoint}</Typography.Text>
-                  <Typography.Text type="secondary">模型</Typography.Text>
-                  <Typography.Text>{record.model || '-'}</Typography.Text>
-                  <Typography.Text type="secondary">流式</Typography.Text>
-                  <Typography.Text>{record.stream ? '是' : '否'}</Typography.Text>
-                  <Typography.Text type="secondary">状态</Typography.Text>
-                  <Typography.Text>{record.status_code}</Typography.Text>
-                  <Typography.Text type="secondary">输入 / 输出 Token</Typography.Text>
-                  <Typography.Text>{record.input_tokens || 0} / {record.output_tokens || 0}</Typography.Text>
-                  <Typography.Text type="secondary">延迟</Typography.Text>
-                  <Typography.Text>{formatLatency(record.latency_ms)}</Typography.Text>
+                  {getLogDetailFields(record).map(({ label, value }) => (
+                    <React.Fragment key={label}>
+                      <Typography.Text type="secondary">{label}</Typography.Text>
+                      <Typography.Text code={label === '请求 ID' || label === '端点'}>{value}</Typography.Text>
+                    </React.Fragment>
+                  ))}
                 </div>
               </div>
             ),

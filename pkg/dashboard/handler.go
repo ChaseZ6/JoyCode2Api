@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/auth"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
@@ -1193,7 +1194,19 @@ func (h *Handler) getAccountStats(w http.ResponseWriter, r *http.Request, apiKey
 }
 
 func (h *Handler) getAccountLogs(w http.ResponseWriter, r *http.Request, apiKey string) {
-	query := store.LogQuery{Limit: 20, Kind: r.URL.Query().Get("kind"), Model: r.URL.Query().Get("model"), Endpoint: r.URL.Query().Get("endpoint")}
+	search := strings.TrimSpace(r.URL.Query().Get("q"))
+	if !utf8.ValidString(search) {
+		writeError(w, http.StatusBadRequest, "q must be valid UTF-8")
+		return
+	}
+	if utf8.RuneCountInString(search) > 200 {
+		writeError(w, http.StatusBadRequest, "q must not exceed 200 characters")
+		return
+	}
+	query := store.LogQuery{
+		Limit: 20, Kind: r.URL.Query().Get("kind"), Model: r.URL.Query().Get("model"),
+		Endpoint: r.URL.Query().Get("endpoint"), Q: search,
+	}
 	if value := r.URL.Query().Get("limit"); value != "" {
 		parsed, err := strconv.Atoi(value)
 		if err != nil || parsed < 1 || parsed > 200 {

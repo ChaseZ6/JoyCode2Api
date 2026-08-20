@@ -1359,8 +1359,16 @@ func (s *Store) getAccountStatsAt(userID string, now time.Time) (*AccountStats, 
 }
 
 type LogQuery struct {
-	Limit, Offset         int
-	Kind, Model, Endpoint string
+	Limit, Offset            int
+	Kind, Model, Endpoint, Q string
+}
+
+func escapeLikePattern(value string) string {
+	return strings.NewReplacer(
+		`\`, `\\`,
+		`%`, `\%`,
+		`_`, `\_`,
+	).Replace(value)
 }
 
 func (s *Store) GetAccountLogsPage(userID string, query LogQuery) ([]RequestLog, int, error) {
@@ -1391,6 +1399,11 @@ func (s *Store) GetAccountLogsPage(userID string, query LogQuery) ([]RequestLog,
 	if query.Endpoint != "" {
 		where = append(where, "endpoint = ?")
 		args = append(args, query.Endpoint)
+	}
+	if search := strings.TrimSpace(query.Q); search != "" {
+		pattern := "%" + escapeLikePattern(search) + "%"
+		where = append(where, `(LOWER(COALESCE(model, '')) LIKE LOWER(?) ESCAPE '\' OR LOWER(COALESCE(endpoint, '')) LIKE LOWER(?) ESCAPE '\' OR LOWER(COALESCE(error_message, '')) LIKE LOWER(?) ESCAPE '\')`)
+		args = append(args, pattern, pattern, pattern)
 	}
 	clause := strings.Join(where, " AND ")
 	var total int

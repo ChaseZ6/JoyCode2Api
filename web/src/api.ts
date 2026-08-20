@@ -108,7 +108,7 @@ export interface RequestLog {
   created_at: string;
 }
 
-export interface LogQuery { limit?: number; offset?: number; kind?: 'all' | 'stream' | 'error'; model?: string; endpoint?: string }
+export interface LogQuery { limit?: number; offset?: number; kind?: 'all' | 'stream' | 'error'; model?: string; endpoint?: string; q?: string }
 export interface PaginatedLogs { logs: RequestLog[]; total: number; limit: number; offset: number; has_more: boolean }
 export interface HealthResponse {
   status: string; accounts: number; version?: string; readiness?: 'ready' | 'degraded' | 'unconfigured' | 'error'; degraded?: boolean;
@@ -211,10 +211,9 @@ export const api = {
     }),
   getAccountStats: (userId: string) =>
     request<AccountStats>(`/api/accounts/${encodeURIComponent(userId)}/stats`),
-  getAccountLogs: (userId: string, query: number | LogQuery = 20) => {
-    const options: LogQuery = typeof query === 'number' ? { limit: query } : query;
+  getAccountLogs: (userId: string, query: LogQuery = { limit: 20 }) => {
     const params = new URLSearchParams();
-    Object.entries(options).forEach(([key, value]) => { if (value !== undefined && value !== '') params.set(key, String(value)); });
+    Object.entries(query).forEach(([key, value]) => { if (value !== undefined && value !== '') params.set(key, String(value)); });
     return request<PaginatedLogs>(`/api/accounts/${encodeURIComponent(userId)}/logs?${params.toString()}`);
   },
   renewToken: (userId: string) =>
