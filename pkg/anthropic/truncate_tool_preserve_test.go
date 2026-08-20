@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-func TestPreemptiveTruncateReservesOutputBudget(t *testing.T) {
-	message := strings.Repeat("context ", 550000)
+func TestPreemptiveTruncateDoesNotTreatMaxTokensAsGuaranteedOutput(t *testing.T) {
+	message := strings.Repeat("x", 520000)
 	req := &MessageRequest{
 		MaxTokens: 64000,
 		Messages: []MessageParam{
@@ -20,51 +20,57 @@ func TestPreemptiveTruncateReservesOutputBudget(t *testing.T) {
 		},
 	}
 	before := estimateTokens(req)
-	if before <= contextWindowSize-64000-contextSafetyTokens {
-		t.Fatalf("fixture must exceed output-aware threshold: %d", before)
+	oldThreshold := contextWindowSize - req.MaxTokens - contextSafetyTokens
+	if before <= oldThreshold {
+		t.Fatalf("fixture must exceed the old 64K-reservation threshold: %d", before)
 	}
-	if rounds := PreemptiveTruncate(req); rounds <= 0 {
-		t.Fatalf("expected output-aware truncation, got %d", rounds)
-	}
-}
-
-func TestFindToolPairBoundary_NoToolUse(t *testing.T) {
-	msgs := []MessageParam{
-		{Role: "user", Content: json.RawMessage(`"hello"`)},
-		{Role: "assistant", Content: json.RawMessage(`"hi"`)},
-		{Role: "user", Content: json.RawMessage(`"how are you"`)},
-		{Role: "assistant", Content: json.RawMessage(`"fine"`)},
-	}
-	got := findToolPairBoundary(msgs, 2)
-	if got != 2 {
-		t.Errorf("expected 2, got %d", got)
+	if rounds := PreemptiveTruncateWithWindow(req, 200000); rounds != 0 {
+		t.Fatalf("64K max_tokens ceiling must not force early truncation, got %d", rounds)
 	}
 }
 
-func TestFindToolPairBoundary_SplitsToolPair(t *testing.T) {
+func TestPreemptiveTruncateUsesResolvedModelWindow(t *testing.T) {
+	req := &MessageRequest{
+		MaxTokens: 64000,
+		Messages: []MessageParam{
+			{Role: "user", Content: json.RawMessage(`"start"`)},
+			{Role: "assistant", Content: json.RawMessage(`"` + strings.Repeat("x", 360000) + `"`)},
+			{Role: "user", Content: json.RawMessage(`"middle"`)},
+			{Role: "assistant", Content: json.RawMessage(`"response"`)},
+			{Role: "user", Content: json.RawMessage(`"latest"`)},
+		},
+	}
+	if rounds := PreemptiveTruncateWithWindow(req, 100000); rounds <= 0 {
+		t.Fatalf("expected truncation for the smaller resolved context window, got %d", rounds)
+	}
+}
+
+func TestFindSafeTruncationStart_PreservesToolPair(t *testing.T) {
 	msgs := []MessageParam{
 		{Role: "user", Content: json.RawMessage(`"hello"`)},
 		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"/a.go","content":"..."}}]`)},
 		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"tu_1","content":"ok"}]`)},
 		{Role: "assistant", Content: json.RawMessage(`"done"`)},
-		{Role: "user", Content: json.RawMessage(`"next"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"tu_2","name":"Read","input":{"file_path":"/b.go"}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"tu_2","content":"ok"}]`)},
 	}
-	got := findToolPairBoundary(msgs, 2)
-	if got != 1 {
-		t.Errorf("expected 1 (include tool_use with its tool_result), got %d", got)
+	got := findSafeTruncationStart(msgs, 4)
+	if got != 4 {
+		t.Errorf("expected 4 (tool_use plus its tool_result), got %d", got)
 	}
 }
 
-func TestFindToolPairBoundary_OrphanedToolResult(t *testing.T) {
+func TestFindSafeTruncationStart_SkipsOrphanedToolResult(t *testing.T) {
 	msgs := []MessageParam{
 		{Role: "user", Content: json.RawMessage(`"hello"`)},
 		{Role: "assistant", Content: json.RawMessage(`"some text"`)},
 		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"tu_1","content":"ok"}]`)},
 		{Role: "assistant", Content: json.RawMessage(`"done"`)},
+		{Role: "user", Content: json.RawMessage(`"next task"`)},
 	}
-	got := findToolPairBoundary(msgs, 2)
-	if got != 3 {
-		t.Errorf("expected 3 (skip orphaned tool_result), got %d", got)
+	got := findSafeTruncationStart(msgs, 2)
+	if got != 4 {
+		t.Errorf("expected 4 (next regular user turn), got %d", got)
 	}
 }
 
@@ -83,6 +89,23 @@ func TestTruncateMessages_PreservesToolPairs(t *testing.T) {
 	result := truncateMessages(req)
 	if !result {
 		t.Fatal("expected truncation to succeed")
+	}
+	if got := string(req.Messages[len(req.Messages)-1].Content); got != `"latest"` {
+		t.Fatalf("latest user turn was not retained: %s", got)
+	}
+	if string(req.Messages[0].Content) != `"first user message"` {
+		t.Fatalf("first user task was not retained: %s", req.Messages[0].Content)
+	}
+	if req.Messages[1].Role != "assistant" || !isCompleteToolExchangeStart(req.Messages, 1) {
+		t.Fatalf("retained history must continue at a complete tool exchange: %#v", req.Messages[1])
+	}
+	for _, message := range req.Messages {
+		if message.Role == "assistant" && strings.Contains(string(message.Content), "auto-truncated") {
+			t.Fatal("truncation notice must not be inserted as a synthetic assistant reply")
+		}
+	}
+	if !strings.Contains(string(req.System), truncationNotice) {
+		t.Fatalf("system truncation notice missing: %s", req.System)
 	}
 
 	toolUseIDs := map[string]bool{}
@@ -111,5 +134,31 @@ func TestTruncateMessages_PreservesToolPairs(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestTruncateMessages_AppendsSystemNoticeOnlyOnce(t *testing.T) {
+	req := &MessageRequest{
+		System: json.RawMessage(`[{"type":"text","text":"original system"}]`),
+		Messages: []MessageParam{
+			{Role: "user", Content: json.RawMessage(`"one"`)},
+			{Role: "assistant", Content: json.RawMessage(`"one response"`)},
+			{Role: "user", Content: json.RawMessage(`"two"`)},
+			{Role: "assistant", Content: json.RawMessage(`"two response"`)},
+			{Role: "user", Content: json.RawMessage(`"three"`)},
+			{Role: "assistant", Content: json.RawMessage(`"three response"`)},
+			{Role: "user", Content: json.RawMessage(`"four"`)},
+			{Role: "assistant", Content: json.RawMessage(`"four response"`)},
+			{Role: "user", Content: json.RawMessage(`"latest"`)},
+		},
+	}
+	if !truncateMessages(req) {
+		t.Fatal("first truncation failed")
+	}
+	if !truncateMessages(req) {
+		t.Fatal("second truncation failed")
+	}
+	if count := strings.Count(string(req.System), truncationNotice); count != 1 {
+		t.Fatalf("truncation notice count = %d, want 1: %s", count, req.System)
 	}
 }

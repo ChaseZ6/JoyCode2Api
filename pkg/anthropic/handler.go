@@ -139,9 +139,9 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		h.handleStream(w, r, &req, client)
+		h.handleStream(w, r, &req, client, info)
 	} else {
-		h.handleNonStream(w, r, &req, client)
+		h.handleNonStream(w, r, &req, client, info)
 	}
 }
 
@@ -162,7 +162,7 @@ func (h *Handler) useNativeAnthropic(r *http.Request, req *MessageRequest, syste
 	return IsNativeAnthropicModel(req.Model) && info.Adapter() != joycode.AdapterOpenAIResponse
 }
 
-func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client) {
+func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client, info joycode.ModelInfo) {
 	systemDefault := ""
 	if h.store != nil {
 		systemDefault = h.store.GetSetting("default_model")
@@ -172,7 +172,7 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 		return
 	}
 	// Preemptive truncation: estimate tokens and truncate before sending
-	if rounds := PreemptiveTruncate(req); rounds < 0 {
+	if rounds := PreemptiveTruncateWithWindow(req, info.ContextWindowTokens()); rounds < 0 {
 		writeAnthropicRequestError(w, "上下文过长，自动截断后仍超出限制，请使用 /compact 或开启新对话。")
 		return
 	} else if rounds > 0 {
@@ -192,10 +192,9 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 		jcResp, lastErr = client.PostContext(r.Context(), chatEndpoint, jcBody)
 		if lastErr != nil {
 			if isContextLimitError(lastErr.Error()) {
-				// Progressive truncation on context limit. Route through
-				// PreemptiveTruncate so the output-token budget (max_tokens)
-				// is accounted for the same way as in preflight truncation.
-				if rounds := PreemptiveTruncate(req); rounds > 0 {
+				// An actual upstream context rejection overrides the local
+				// estimate: remove one more coherent section before retrying.
+				if truncateMessages(req) {
 					jcBody = TranslateRequest(req, store.GetAccountDefaultModel(r), systemDefault)
 					reqLog(r).Warn("retrying with truncated messages (non-stream)", "attempt", attempt)
 					continue
@@ -273,7 +272,7 @@ func (r *prependReader) Close() error {
 	return r.body.Close()
 }
 
-func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client) {
+func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client, info joycode.ModelInfo) {
 	systemDefault := ""
 	if h.store != nil {
 		systemDefault = h.store.GetSetting("default_model")
@@ -293,7 +292,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	logRequestDetails(r, "translated request (stream)", jcBody)
 
 	// Preemptive truncation: estimate tokens and truncate before sending
-	if rounds := PreemptiveTruncate(req); rounds < 0 {
+	if rounds := PreemptiveTruncateWithWindow(req, info.ContextWindowTokens()); rounds < 0 {
 		writeAnthropicRequestError(w, "上下文过长，自动截断后仍超出限制，请使用 /compact 或开启新对话。")
 		return
 	} else if rounds > 0 {
@@ -348,7 +347,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	resp, err := h.connectStreamWithRetry(r, jcBody, client)
 	for truncRound := 0; err != nil && isContextLimitError(err.Error()) && truncRound < maxTruncationRounds; truncRound++ {
 		reqLog(r).Warn("stream context limit, truncating", "round", truncRound+1)
-		if rounds := PreemptiveTruncate(req); rounds <= 0 {
+		if !truncateMessages(req) {
 			break
 		}
 		jcBody = TranslateRequest(req, store.GetAccountDefaultModel(r), systemDefault)
