@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -383,46 +384,20 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		ID        string
 		Name      string
 		Arguments string
-		// opened marks that this tool has had at least one content block;
-		// reopening after an interleaved interruption replays Arguments.
-		opened   bool
-		blockIdx int
 	}
 	toolCalls := make(map[int]*toolCallAccum)
 	currentBlockIndex := 0
 	// openBlock tracks the single currently-open content block (-1 = none).
 	// Anthropic requires blocks to be sequential: a block must be stopped
 	// before the next one starts, and deltas must target the open block.
-	// Interleaved upstream deltas (tool0, tool1, tool0...) are therefore
-	// re-chunked: a tool block is closed when the stream switches away from
-	// it, and reopened (with the arguments accumulated so far) if more
-	// deltas for the same tool index arrive later.
+	// Text blocks are streamed in real time; tool blocks are buffered and
+	// emitted sequentially at finish time, which guarantees protocol
+	// compliance even when upstream interleaves or parallelises tool deltas.
 	openBlock := -1
 	openIsText := false
-	toolBlockOpened := false
 	closeOpenBlock := func() {
 		if openBlock < 0 {
 			return
-		}
-		if !openIsText {
-			// Guarantee the tool_use input is valid JSON before the block
-			// closes: if the accumulated arguments are incomplete (truncated
-			// upstream) send a corrective "{}" so clients don't try to parse
-			// partial JSON. Valid partial deltas are left as-is.
-			for _, tc := range toolCalls {
-				if tc.blockIdx != openBlock {
-					continue
-				}
-				if !json.Valid([]byte(tc.Arguments)) {
-					FormatSSE(w, "content_block_delta", sseContentBlockDelta{
-						Type:  "content_block_delta",
-						Index: openBlock,
-						Delta: deltaText{Type: "input_json_delta", PartialJSON: "{}"},
-					})
-					tc.Arguments = "{}"
-				}
-				break
-			}
 		}
 		FormatSSE(w, "content_block_stop", sseContentBlockStop{
 			Type: "content_block_stop", Index: openBlock,
@@ -430,20 +405,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		openBlock = -1
 		currentBlockIndex++
 	}
-	openTextBlock := func() {
-		openIsText = true
-		openBlock = currentBlockIndex
-		FormatSSE(w, "content_block_start", sseContentBlockStart{
-			Type:         "content_block_start",
-			Index:        currentBlockIndex,
-			ContentBlock: ContentBlock{Type: "text", Text: ""},
-		})
-		flusher.Flush()
-	}
-	openToolBlock := func(idx int, reopen bool) {
+	// Tool blocks are emitted sequentially at finish time in sorted tool
+	// index order: each block gets a content_block_start, one input_json_delta
+	// holding the full accumulated arguments JSON, and a content_block_stop.
+	emitToolBlock := func(tc *toolCallAccum) {
+		closeOpenBlock()
 		openIsText = false
 		openBlock = currentBlockIndex
-		tc := toolCalls[idx]
 		tcID := tc.ID
 		if tcID == "" {
 			tcID = "toolu_" + newID()
@@ -459,17 +427,29 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 				Input: json.RawMessage("{}"),
 			},
 		})
-		if reopen && tc.Arguments != "" {
-			// Replay the arguments accumulated before this block was closed so
-			// the client can continue appending new deltas to valid JSON.
-			FormatSSE(w, "content_block_delta", sseContentBlockDelta{
-				Type:  "content_block_delta",
-				Index: currentBlockIndex,
-				Delta: deltaText{Type: "input_json_delta", PartialJSON: tc.Arguments},
-			})
+		args := tc.Arguments
+		if args == "" || !json.Valid([]byte(args)) {
+			// Upstream truncated the arguments mid-stream (e.g. finish_reason
+			// length): degrade to an empty object so clients don't try to
+			// parse partial JSON.
+			args = "{}"
 		}
+		FormatSSE(w, "content_block_delta", sseContentBlockDelta{
+			Type:  "content_block_delta",
+			Index: currentBlockIndex,
+			Delta: deltaText{Type: "input_json_delta", PartialJSON: args},
+		})
+		closeOpenBlock()
+	}
+	openTextBlock := func() {
+		openIsText = true
+		openBlock = currentBlockIndex
+		FormatSSE(w, "content_block_start", sseContentBlockStart{
+			Type:         "content_block_start",
+			Index:        currentBlockIndex,
+			ContentBlock: ContentBlock{Type: "text", Text: ""},
+		})
 		flusher.Flush()
-		toolBlockOpened = true
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -509,30 +489,12 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			if tc.Function.Name != "" {
 				toolCalls[idx].Name = tc.Function.Name
 			}
-			tcAccum := toolCalls[idx]
-			tcAccum.Arguments += tc.Function.Arguments
-			// A delta for a different tool than the open block, or for a tool
-			// whose block was already closed (interleaved upstream chunks):
-			// close the open block and (re)open one for this tool index.
-			if openIsText || (tcAccum.blockIdx != openBlock) {
-				closeOpenBlock()
-				openToolBlock(idx, tcAccum.opened)
-				tcAccum.blockIdx = openBlock
-				tcAccum.opened = true
-			}
-			if tc.Function.Arguments != "" {
-				FormatSSE(w, "content_block_delta", sseContentBlockDelta{
-					Type:  "content_block_delta",
-					Index: openBlock,
-					Delta: deltaText{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
-				})
-				flusher.Flush()
-			}
+			toolCalls[idx].Arguments += tc.Function.Arguments
 		}
 
 		text := choice.Delta.Content
 		if text != "" {
-			if !openIsText || openBlock < 0 {
+			if openBlock < 0 || !openIsText {
 				closeOpenBlock()
 				openTextBlock()
 			}
@@ -551,11 +513,23 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			reqLog(r).Info("stream completed", "chunks", chunkCount, "reason", fr, "tools", len(toolCalls))
 
 			// Ensure at least one content block exists — Anthropic SDK requires it
-			if openBlock < 0 && currentBlockIndex == 0 && !toolBlockOpened {
+			if openBlock < 0 && currentBlockIndex == 0 && len(toolCalls) == 0 {
 				openTextBlock()
 			}
 
-			closeOpenBlock()
+			// Emit buffered tool blocks sequentially in sorted tool index order.
+			if len(toolCalls) > 0 {
+				toolIndexes := make([]int, 0, len(toolCalls))
+				for idx := range toolCalls {
+					toolIndexes = append(toolIndexes, idx)
+				}
+				sort.Ints(toolIndexes)
+				for _, idx := range toolIndexes {
+					emitToolBlock(toolCalls[idx])
+				}
+			} else {
+				closeOpenBlock()
+			}
 
 			if fr == "content_filter" {
 				// Don't disguise a filter-truncated turn as a clean end_turn
