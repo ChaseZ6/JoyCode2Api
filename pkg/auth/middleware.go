@@ -31,14 +31,12 @@ func JWTMiddleware(getter SettingsGetter, next http.Handler) http.Handler {
 		}
 
 		whitelist := map[string]bool{
-			"/api/auth/status":     true,
-			"/api/auth/setup":      true,
-			"/api/auth/login":      true,
-			"/api/health":          true,
-			"/api/github-stars":    true,
-			"/api/browser-login":   true,
-			"/api/oauth-callback":  true,
-			"/api/oauth-submit":    true,
+			"/api/auth/status":    true,
+			"/api/auth/setup":     true,
+			"/api/auth/login":     true,
+			"/api/health":         true,
+			"/api/github-stars":   true,
+			"/api/oauth-callback": true,
 		}
 		if whitelist[path] {
 			next.ServeHTTP(w, r)
@@ -71,9 +69,9 @@ func JWTMiddleware(getter SettingsGetter, next http.Handler) http.Handler {
 		}
 
 		claims, err := ValidateToken(tokenStr, secret)
-		if err != nil {
+		if err != nil || claims.Role != "admin" {
 			slog.Warn("auth: JWT validation failed", "error", err, "path", path)
-			writeAuthError(w, "invalid or expired token")
+			writeAuthError(w, "invalid, expired, or unauthorized token")
 			return
 		}
 

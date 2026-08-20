@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/auth"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/proxy"
@@ -29,9 +30,11 @@ import (
 )
 
 type Handler struct {
-	store    *store.Store
-	staticFS fs.FS
-	keeper   *keepalive.Keeper
+	store       *store.Store
+	staticFS    fs.FS
+	keeper      *keepalive.Keeper
+	oauthMu     sync.Mutex
+	oauthStates map[string]time.Time
 	// Version is the proxy version reported by /api/health; set by the server
 	// at startup (the build-time Version lives in package main).
 	Version string
@@ -39,9 +42,8 @@ type Handler struct {
 
 func NewHandler(s *store.Store, staticFS fs.FS, k *keepalive.Keeper) *Handler {
 	return &Handler{
-		store:    s,
-		staticFS: staticFS,
-		keeper:   k,
+		store: s, staticFS: staticFS, keeper: k,
+		oauthStates: make(map[string]time.Time),
 	}
 }
 
@@ -88,7 +90,7 @@ const ghRepo = "vibe-coding-labs/JoyCode2Api"
 var ghClient = &http.Client{Timeout: 10 * time.Second}
 
 func (h *Handler) handleGitHubStars(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -151,7 +153,7 @@ func (h *Handler) handleGitHubStars(w http.ResponseWriter, r *http.Request) {
 // --- Errors Handler ---
 
 func (h *Handler) handleErrors(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -265,7 +267,7 @@ const passwordHashKey = "auth_password_hash"
 const defaultJWTExpiry = 24 * time.Hour
 
 func (h *Handler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -283,7 +285,7 @@ func (h *Handler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -342,7 +344,7 @@ func (h *Handler) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -385,7 +387,7 @@ func (h *Handler) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -459,15 +461,12 @@ func formatKeys(m map[string]interface{}) string {
 	return strings.Join(keys, ",")
 }
 
-func setCors(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key")
+func setCors(w http.ResponseWriter, r *http.Request) {
+	common.ApplyLocalCORS(w, r, "GET, POST, PUT, DELETE, OPTIONS", "Content-Type, Authorization, x-api-key")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	setCors(w)
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		slog.Error("writeJSON: encode failed", "error", err)
@@ -489,7 +488,7 @@ func readJSONBody(w http.ResponseWriter, r *http.Request, v interface{}) bool {
 // --- Account Handlers ---
 
 func (h *Handler) handleAccounts(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -575,7 +574,7 @@ func (h *Handler) addAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAutoLogin(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -661,7 +660,7 @@ func (h *Handler) handleAutoLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleClearAllAccounts(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -686,7 +685,7 @@ func (h *Handler) handleClearAllAccounts(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) handleExportAccounts(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -711,7 +710,7 @@ func (h *Handler) handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleImportAccounts(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -749,7 +748,7 @@ func (h *Handler) handleImportAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleBrowserLogin(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -773,13 +772,21 @@ func (h *Handler) handleBrowserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := hex.EncodeToString(b)
+	h.oauthMu.Lock()
+	for key, expires := range h.oauthStates {
+		if time.Now().After(expires) {
+			delete(h.oauthStates, key)
+		}
+	}
+	h.oauthStates[token] = time.Now().Add(5 * time.Minute)
+	h.oauthMu.Unlock()
 
 	loginURL := fmt.Sprintf(
 		"https://joycode.jd.com/login/?ideAppName=JoyCode&fromIde=ide&redirect=0&authPort=%s&authKey=%s",
 		url.QueryEscape(port), url.QueryEscape(token),
 	)
 
-	slog.Info("browser-login: generated login URL", "port", port, "token", token)
+	slog.Info("browser-login: generated login URL", "port", port)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":    true,
@@ -841,14 +848,25 @@ func (h *Handler) validateAndSavePtKey(ptKey string) (userID, nickname string, e
 }
 
 func (h *Handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 
 	ptKey := r.URL.Query().Get("pt_key")
 	loginType := r.URL.Query().Get("login_type")
 	tenant := r.URL.Query().Get("tenant")
 	authKey := r.URL.Query().Get("authKey")
+	h.oauthMu.Lock()
+	expires, validState := h.oauthStates[authKey]
+	if validState {
+		delete(h.oauthStates, authKey)
+	}
+	h.oauthMu.Unlock()
+	if !validState || authKey == "" || time.Now().After(expires) {
+		slog.Warn("oauth-callback: rejected invalid or expired state")
+		http.Redirect(w, r, "/?login_error="+url.QueryEscape("授权状态无效或已过期，请重新发起登录"), http.StatusFound)
+		return
+	}
 
-	slog.Info("oauth-callback: received", "login_type", loginType, "tenant", tenant, "auth_key", authKey, "pt_key_len", len(ptKey))
+	slog.Info("oauth-callback: received", "login_type", loginType, "tenant", tenant, "pt_key_len", len(ptKey))
 
 	userID, _, err := h.validateAndSavePtKey(ptKey)
 	if err != nil {
@@ -857,26 +875,11 @@ func (h *Handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-issue JWT so the frontend dashboard is immediately accessible
-	jwtSecret := h.store.GetSetting("auth_jwt_secret")
-	if jwtSecret != "" {
-		if token, jwtErr := auth.GenerateToken(userID, jwtSecret, 7*24*time.Hour); jwtErr == nil {
-			http.SetCookie(w, &http.Cookie{
-				Name:     "joycode_auto_jwt",
-				Value:    token,
-				Path:     "/",
-				MaxAge:   30,
-				HttpOnly: false,
-				SameSite: http.SameSiteLaxMode,
-			})
-		}
-	}
-
 	http.Redirect(w, r, "/?login_success="+url.QueryEscape(userID), http.StatusFound)
 }
 
 func (h *Handler) handleOAuthSubmit(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -909,7 +912,7 @@ func (h *Handler) handleOAuthSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleQRLoginInit(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -934,7 +937,7 @@ func (h *Handler) handleQRLoginInit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleQRLoginStatus(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1021,7 +1024,7 @@ func (h *Handler) handleQRLoginStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAccountAction(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1236,7 +1239,7 @@ func (h *Handler) updateRemark(w http.ResponseWriter, r *http.Request, userID st
 }
 
 func (h *Handler) handleClearJoyCodeSession(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1309,7 +1312,7 @@ func (h *Handler) handleClearJoyCodeSession(w http.ResponseWriter, r *http.Reque
 // --- Model Handlers ---
 
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1348,7 +1351,7 @@ func modelOptions(models []joycode.ModelInfo) []map[string]interface{} {
 // --- Stats Handler ---
 
 func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1397,7 +1400,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 // --- Settings Handler ---
 
 func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1459,7 +1462,7 @@ func coerceSettingValue(raw json.RawMessage) string {
 // --- Health Handler ---
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	setCors(w)
+	setCors(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return

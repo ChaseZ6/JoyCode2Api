@@ -50,7 +50,7 @@ var configCmd = &cobra.Command{
 		// Server
 		fmt.Println()
 		fmt.Println("  Server:")
-		fmt.Printf("    Default Host:  %s\n", "0.0.0.0")
+		fmt.Printf("    Default Host:  %s\n", "127.0.0.1")
 		fmt.Printf("    Default Port:  %d\n", 34891)
 
 		// Service

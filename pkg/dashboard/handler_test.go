@@ -94,14 +94,15 @@ func TestHandleHealthCORS(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	req := httptest.NewRequest("OPTIONS", "/api/health", nil)
+	req.Header.Set("Origin", "http://localhost:34891")
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNoContent {
 		t.Errorf("OPTIONS status = %d, want %d", w.Code, http.StatusNoContent)
 	}
-	if origin := w.Header().Get("Access-Control-Allow-Origin"); origin != "*" {
-		t.Errorf("CORS origin = %q, want *", origin)
+	if origin := w.Header().Get("Access-Control-Allow-Origin"); origin != "http://localhost:34891" {
+		t.Errorf("CORS origin = %q", origin)
 	}
 }
 

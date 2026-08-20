@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
@@ -36,20 +37,26 @@ func (s *Server) getClient(r *http.Request) *joycode.Client {
 
 // RegisterRoutes registers all OpenAI-compatible endpoints on the mux.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/v1/chat/completions", s.handleChat)
-	mux.HandleFunc("/v1/responses", s.handleNativeResponses)
-	mux.HandleFunc("/responses", s.handleNativeResponses)
-	mux.HandleFunc("/v1/models", s.handleModels)
-	mux.HandleFunc("/v1/web-search", s.handleWebSearch)
-	mux.HandleFunc("/v1/rerank", s.handleRerank)
-	mux.HandleFunc("/v1/", handleUnknownV1)
-	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/v1/chat/completions", withOpenAICORS(s.handleChat))
+	mux.HandleFunc("/v1/responses", withOpenAICORS(s.handleNativeResponses))
+	mux.HandleFunc("/responses", withOpenAICORS(s.handleNativeResponses))
+	mux.HandleFunc("/v1/models", withOpenAICORS(s.handleModels))
+	mux.HandleFunc("/v1/web-search", withOpenAICORS(s.handleWebSearch))
+	mux.HandleFunc("/v1/rerank", withOpenAICORS(s.handleRerank))
+	mux.HandleFunc("/v1/", withOpenAICORS(handleUnknownV1))
+	mux.HandleFunc("/health", withOpenAICORS(s.handleHealth))
 }
 
 const corsAllowedHeaders = "Authorization, Content-Type, Accept, OpenAI-Organization, OpenAI-Project, X-API-Key, X-Request-ID"
 
+func withOpenAICORS(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		common.ApplyLocalCORS(w, r, "GET, POST, OPTIONS", corsAllowedHeaders)
+		handler(w, r)
+	}
+}
+
 func writeCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
 }
@@ -62,7 +69,6 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(code)
 	w.Write(b)
 }

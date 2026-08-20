@@ -115,3 +115,46 @@ func TestRequestLogMiddleware_RecordsInternalStreamFailure(t *testing.T) {
 		t.Errorf("unexpected usage for truncated stream: %d/%d", log.InputTokens, log.OutputTokens)
 	}
 }
+
+func TestInferenceAuthMiddlewareLoopbackKeepsCompatibility(t *testing.T) {
+	s, err := store.Open(t.TempDir() + "/proxy.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/responses", nil)
+	inferenceAuthMiddleware(next, s, "127.0.0.1").ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d", rec.Code)
+	}
+}
+
+func TestInferenceAuthMiddlewareNonLoopbackRequiresValidToken(t *testing.T) {
+	s, err := store.Open(t.TempDir() + "/proxy.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.AddAccount("u", "pt", "test", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	account, _ := s.GetAccount("u")
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := inferenceAuthMiddleware(next, s, "0.0.0.0")
+	for _, tc := range []struct {
+		key  string
+		want int
+	}{{"", 401}, {"wrong", 401}, {account.APIToken, 204}} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/responses", nil)
+		if tc.key != "" {
+			req.Header.Set("Authorization", "Bearer "+tc.key)
+		}
+		handler.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("key=%q status=%d want=%d body=%s", tc.key, rec.Code, tc.want, rec.Body.String())
+		}
+	}
+}

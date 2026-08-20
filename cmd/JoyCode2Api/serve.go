@@ -44,7 +44,7 @@ var serveCmd = &cobra.Command{
 	Short:   "启动代理服务器",
 	Long:    "启动 OpenAI/Anthropic 兼容的 API 代理服务器，将请求转换为 JoyCode API 格式。",
 	GroupID: "core",
-	Example: `  # 默认启动（0.0.0.0:34891）
+	Example: `  # 默认启动（127.0.0.1:34891）
   joycode-proxy serve
 
   # 指定端口
@@ -217,6 +217,7 @@ var serveCmd = &cobra.Command{
 
 		var handler http.Handler = mux
 		if s != nil {
+			handler = inferenceAuthMiddleware(handler, s, serveHost)
 			handler = auth.JWTMiddleware(s, handler)
 			handler = requestLogMiddleware(handler, s, requestLogWriter)
 		}
@@ -318,7 +319,7 @@ var serveCmd = &cobra.Command{
 }
 
 func init() {
-	serveCmd.Flags().StringVarP(&serveHost, "host", "H", "0.0.0.0", "绑定地址")
+	serveCmd.Flags().StringVarP(&serveHost, "host", "H", "127.0.0.1", "绑定地址")
 	serveCmd.Flags().IntVarP(&servePort, "port", "p", 34891, "绑定端口")
 	serveCmd.Flags().BoolVar(&serveTLS, "tls", true, "启用 HTTPS（自签名证书）")
 	rootCmd.AddCommand(serveCmd)
@@ -496,6 +497,34 @@ func (rw *responseWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func inferenceAuthMiddleware(next http.Handler, s *store.Store, bindHost string) http.Handler {
+	ip := net.ParseIP(bindHost)
+	if bindHost == "localhost" || (ip != nil && ip.IsLoopback()) {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isProxyInferencePath(r.URL.Path) || r.Method == http.MethodOptions || (r.Method == http.MethodGet && r.URL.Path == "/v1/models") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := extractAPIKey(r)
+		var account *store.Account
+		if key != "" {
+			account, _ = s.GetAccountByToken(key)
+			if account == nil {
+				account, _ = s.GetAccount(key)
+			}
+		}
+		if account == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":{"type":"authentication_error","code":"invalid_api_key","message":"A valid account API token is required for non-loopback access"}}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func isProxyInferencePath(path string) bool {

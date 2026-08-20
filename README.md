@@ -118,7 +118,7 @@ CGO_ENABLED=0 go build -o JoyCode2Api ./cmd/JoyCode2Api/
     POST /v1/messages          — Chat (Anthropic/Claude Code format)
     ...
   Dashboard:
-    http://0.0.0.0:34891 — Web UI
+    http://127.0.0.1:34891 — Web UI
 ```
 
 > **macOS 且已装 JoyCode IDE**：可以不加 `--skip-validation`，程序会自动从 `~/Library/Application Support/JoyCode/User/globalStorage/state.vscdb` 读取已登录凭据。其他平台首次启动一律加 `--skip-validation`。
@@ -185,7 +185,7 @@ cursor   # 或 codex
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `-H, --host` | `0.0.0.0` | 绑定地址 |
+| `-H, --host` | `127.0.0.1` | 绑定地址 |
 | `-p, --port` | `34891` | 监听端口 |
 | `--tls` | `true` | 启用 HTTPS（自签名证书），同时仍接受 HTTP |
 | `--skip-validation` | `false` | 跳过本地凭据检测，**非 macOS 首次启动必加** |

@@ -43,14 +43,16 @@ func (h *Handler) getClient(r *http.Request) *joycode.Client {
 
 // RegisterRoutes registers the Anthropic Messages API endpoint.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/v1/messages", h.handleMessages)
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		common.ApplyLocalCORS(w, r, "POST, OPTIONS", "Content-Type, Authorization, X-API-Key, Anthropic-Version, Anthropic-Beta")
+		h.handleMessages(w, r)
+	})
 }
 
 func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, Anthropic-Version, Anthropic-Beta")
 		w.WriteHeader(200)
 		return
 	}
@@ -274,7 +276,6 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(200)
 
 	msgID := NewMessageID()
@@ -556,7 +557,6 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(200)
 
 	// Send an immediate keepalive so the client knows the connection is alive
@@ -1121,7 +1121,6 @@ func writeAnthropicJSON(w http.ResponseWriter, code int, v interface{}) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(code)
 	w.Write(b)
 }
