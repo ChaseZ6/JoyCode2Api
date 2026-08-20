@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1192,24 +1193,37 @@ func (h *Handler) getAccountStats(w http.ResponseWriter, r *http.Request, apiKey
 }
 
 func (h *Handler) getAccountLogs(w http.ResponseWriter, r *http.Request, apiKey string) {
-	limit := 200
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, err := fmt.Sscanf(l, "%d", &limit); err == nil && n == 1 && limit > 0 && limit <= 1000 {
-			// ok
-		} else {
-			limit = 200
+	query := store.LogQuery{Limit: 20, Kind: r.URL.Query().Get("kind"), Model: r.URL.Query().Get("model"), Endpoint: r.URL.Query().Get("endpoint")}
+	if value := r.URL.Query().Get("limit"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+			return
 		}
+		query.Limit = parsed
 	}
-	logs, err := h.store.GetAccountLogs(apiKey, limit)
+	if value := r.URL.Query().Get("offset"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be non-negative")
+			return
+		}
+		query.Offset = parsed
+	}
+	logs, total, err := h.store.GetAccountLogsPage(apiKey, query)
 	if err != nil {
+		if strings.Contains(err.Error(), "invalid log kind") {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		slog.Error("get account logs", "api_key", apiKey, "error", err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if logs == nil {
-		logs = []store.RequestLog{}
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"logs": logs, "total": len(logs)})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"logs": logs, "total": total, "limit": query.Limit, "offset": query.Offset,
+		"has_more": query.Offset+len(logs) < total,
+	})
 }
 
 func (h *Handler) renewToken(w http.ResponseWriter, r *http.Request, apiKey string) {
@@ -1468,19 +1482,44 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accounts, _ := h.store.ListAccounts()
-	count := 0
-	if accounts != nil {
-		count = len(accounts)
+	accounts, err := h.store.ListAccounts()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"status": "error", "readiness": "error", "accounts": 0, "version": h.Version, "error": err.Error()})
+		return
 	}
-
+	valid, invalid, unknown := 0, 0, 0
+	var activeAccounts, activeSessions int64
+	for _, account := range accounts {
+		switch account.CredentialValid {
+		case 1:
+			valid++
+		case 0:
+			invalid++
+		default:
+			unknown++
+		}
+		sessions := proxy.GetActiveSessions(account.UserID)
+		activeSessions += sessions
+		if sessions > 0 {
+			activeAccounts++
+		}
+	}
+	readiness := "ready"
+	if len(accounts) == 0 {
+		readiness = "unconfigured"
+	} else if valid == 0 || invalid > 0 {
+		readiness = "degraded"
+	}
 	version := h.Version
 	if version == "" {
 		version = "dev"
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":   "ok",
-		"accounts": count,
-		"version":  version,
+		"status": "ok", "accounts": len(accounts), "version": version,
+		"readiness": readiness, "degraded": readiness == "degraded",
+		"account_health": map[string]interface{}{
+			"configured": len(accounts), "credentials_valid": valid, "credentials_invalid": invalid,
+			"credentials_unknown": unknown, "active_accounts": activeAccounts, "active_sessions": activeSessions,
+		},
 	})
 }

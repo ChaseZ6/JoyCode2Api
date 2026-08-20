@@ -1358,30 +1358,67 @@ func (s *Store) getAccountStatsAt(userID string, now time.Time) (*AccountStats, 
 	return as, nil
 }
 
-func (s *Store) GetAccountLogs(userID string, limit int) ([]RequestLog, error) {
-	if limit <= 0 {
-		limit = 100
+type LogQuery struct {
+	Limit, Offset         int
+	Kind, Model, Endpoint string
+}
+
+func (s *Store) GetAccountLogsPage(userID string, query LogQuery) ([]RequestLog, int, error) {
+	if query.Limit <= 0 {
+		query.Limit = 20
 	}
-	rows, err := s.db.Query(
-		"SELECT id, api_key, model, endpoint, stream, status_code, latency_ms, COALESCE(error_message, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), created_at FROM request_logs WHERE api_key = ? ORDER BY id DESC LIMIT ?",
-		userID, limit,
-	)
+	if query.Limit > 200 {
+		query.Limit = 200
+	}
+	if query.Offset < 0 {
+		query.Offset = 0
+	}
+	where := []string{"api_key = ?"}
+	args := []interface{}{userID}
+	switch query.Kind {
+	case "", "all":
+	case "stream":
+		where = append(where, "stream = 1")
+	case "error":
+		where = append(where, "status_code >= 400")
+	default:
+		return nil, 0, fmt.Errorf("invalid log kind %q", query.Kind)
+	}
+	if query.Model != "" {
+		where = append(where, "model = ?")
+		args = append(args, query.Model)
+	}
+	if query.Endpoint != "" {
+		where = append(where, "endpoint = ?")
+		args = append(args, query.Endpoint)
+	}
+	clause := strings.Join(where, " AND ")
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE "+clause, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	pageArgs := append(append([]interface{}{}, args...), query.Limit, query.Offset)
+	rows, err := s.db.Query("SELECT id, api_key, model, endpoint, stream, status_code, latency_ms, COALESCE(error_message, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), created_at FROM request_logs WHERE "+clause+" ORDER BY id DESC LIMIT ? OFFSET ?", pageArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
-
-	var logs []RequestLog
+	logs := make([]RequestLog, 0, query.Limit)
 	for rows.Next() {
-		var l RequestLog
-		var streamInt int
-		if err := rows.Scan(&l.ID, &l.UserID, &l.Model, &l.Endpoint, &streamInt, &l.StatusCode, &l.LatencyMs, &l.ErrorMessage, &l.InputTokens, &l.OutputTokens, &l.CreatedAt); err != nil {
-			return nil, err
+		var log RequestLog
+		var stream int
+		if err := rows.Scan(&log.ID, &log.UserID, &log.Model, &log.Endpoint, &stream, &log.StatusCode, &log.LatencyMs, &log.ErrorMessage, &log.InputTokens, &log.OutputTokens, &log.CreatedAt); err != nil {
+			return nil, 0, err
 		}
-		l.Stream = streamInt == 1
-		logs = append(logs, l)
+		log.Stream = stream == 1
+		logs = append(logs, log)
 	}
-	return logs, rows.Err()
+	return logs, total, rows.Err()
+}
+
+func (s *Store) GetAccountLogs(userID string, limit int) ([]RequestLog, error) {
+	logs, _, err := s.GetAccountLogsPage(userID, LogQuery{Limit: limit})
+	return logs, err
 }
 
 func (s *Store) GetRecentLogs(limit int) ([]RequestLog, error) {

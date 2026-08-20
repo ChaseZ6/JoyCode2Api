@@ -741,3 +741,36 @@ func TestStoreRejectsNewerSchemaVersion(t *testing.T) {
 		t.Fatalf("Open error=%v", err)
 	}
 }
+
+func TestGetAccountLogsPageFiltersAndTotal(t *testing.T) {
+	s := openTestStore(t)
+	for _, entry := range []struct {
+		model, endpoint string
+		stream          bool
+		status          int
+	}{
+		{"A", "/v1/messages", true, 200}, {"A", "/responses", true, 500},
+		{"B", "/responses", false, 200}, {"B", "/responses", true, 502},
+	} {
+		if err := s.LogRequest("u", entry.model, entry.endpoint, entry.stream, entry.status, 1, "", 1, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logs, total, err := s.GetAccountLogsPage("u", LogQuery{Limit: 1, Offset: 1, Kind: "stream"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || len(logs) != 1 {
+		t.Fatalf("total=%d len=%d", total, len(logs))
+	}
+	logs, total, err = s.GetAccountLogsPage("u", LogQuery{Limit: 10, Kind: "error", Model: "B", Endpoint: "/responses"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(logs) != 1 || logs[0].StatusCode != 502 {
+		t.Fatalf("total=%d logs=%+v", total, logs)
+	}
+	if _, _, err := s.GetAccountLogsPage("u", LogQuery{Kind: "invalid"}); err == nil {
+		t.Fatal("expected invalid kind error")
+	}
+}

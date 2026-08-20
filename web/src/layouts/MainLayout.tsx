@@ -31,16 +31,30 @@ const MainLayout: React.FC = () => {
   const { token } = theme.useToken();
   useDocumentTitle();
 
-  const [healthStatus, setHealthStatus] = useState<'ok' | 'error'>('ok');
+  const [healthStatus, setHealthStatus] = useState<'loading' | 'ok' | 'degraded' | 'error'>('loading');
   const [accountCount, setAccountCount] = useState(0);
+  const [activeSessions, setActiveSessions] = useState(0);
   const [stars, setStars] = useState<number | null>(null);
 
   useEffect(() => {
-    api.getHealth().then((h) => {
-      setHealthStatus(h.status === 'ok' ? 'ok' : 'error');
-      setAccountCount(h.accounts);
-    }).catch(() => setHealthStatus('error'));
-    api.getGitHubStars().then((s) => { if (s > 0) setStars(s); }).catch(() => {});
+    let cancelled = false;
+    const refreshHealth = async () => {
+      try {
+        const health = await api.getHealth();
+        if (cancelled) return;
+        setHealthStatus(health.status !== 'ok' ? 'error' : health.degraded ? 'degraded' : 'ok');
+        setAccountCount(health.account_health?.configured ?? health.accounts);
+        setActiveSessions(health.account_health?.active_sessions ?? 0);
+      } catch {
+        if (!cancelled) setHealthStatus('error');
+      }
+    };
+    refreshHealth();
+    const timer = setInterval(() => { if (!document.hidden) refreshHealth(); }, 30000);
+    const onVisibility = () => { if (!document.hidden) refreshHealth(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    api.getGitHubStars().then((s) => { if (s > 0 && !cancelled) setStars(s); }).catch(() => {});
+    return () => { cancelled = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVisibility); };
   }, []);
 
   const selectedKey = location.pathname.startsWith('/accounts') ? '/accounts'
@@ -84,10 +98,12 @@ const MainLayout: React.FC = () => {
       <Layout>
         <Header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
-            <Tag color={healthStatus === 'ok' ? 'success' : 'error'} icon={<CheckCircleOutlined />}>
-              {healthStatus === 'ok' ? '服务正常' : '服务异常'}
+            <Tag color={healthStatus === 'ok' ? 'success' : healthStatus === 'degraded' ? 'warning' : healthStatus === 'loading' ? 'default' : 'error'} icon={<CheckCircleOutlined />}>
+              {healthStatus === 'ok' ? '代理服务正常' : healthStatus === 'degraded' ? '账号状态需关注' : healthStatus === 'loading' ? '检查服务状态' : '服务异常'}
             </Tag>
-            <Text type="secondary" style={{ fontSize: 13 }}>{accountCount} 个账号在线</Text>
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              {accountCount} 个已配置账号{activeSessions > 0 ? ` · ${activeSessions} 个活跃会话` : ''}
+            </Text>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>
             <Tooltip title="退出登录">

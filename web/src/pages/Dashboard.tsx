@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  Card, Col, Row, Statistic, Empty, Typography, Table, Tag, Divider, Skeleton,
+  Card, Col, Row, Statistic, Empty, Typography, Table, Tag, Divider, Skeleton, Button, Space,
 } from 'antd';
 import {
   ThunderboltOutlined,
@@ -12,6 +12,7 @@ import {
   DashboardOutlined,
   FireOutlined,
   RiseOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -57,9 +58,15 @@ const Dashboard: React.FC = () => {
   const [stats, setStats] = useState<Stats | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState('');
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const inFlight = useRef(false);
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (initial = false) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    if (initial) setLoading(true); else setRefreshing(true);
     try {
       const [statsData, accountsData] = await Promise.all([
         api.getStats(),
@@ -67,14 +74,24 @@ const Dashboard: React.FC = () => {
       ]);
       setStats(statsData);
       setAccounts(accountsData);
+      setRefreshError('');
+      setLastUpdated(new Date());
     } catch (e) {
-      console.error(e);
+      setRefreshError(e instanceof Error ? e.message : '刷新失败');
     } finally {
       setLoading(false);
+      setRefreshing(false);
+      inFlight.current = false;
     }
   };
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => {
+    fetchData(true);
+    const timer = setInterval(() => { if (!document.hidden) fetchData(); }, 15000);
+    const onVisibility = () => { if (!document.hidden) fetchData(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisibility); };
+  }, []);
 
   if (loading) {
     return (
@@ -162,7 +179,11 @@ const Dashboard: React.FC = () => {
     {
       title: '状态',
       key: 'status',
-      render: () => <Tag color="success">在线</Tag>,
+      render: (_: unknown, record: Account) => {
+        if (record.credential_valid === 1) return <Tag color="success">凭据有效{record.active_sessions > 0 ? ` · ${record.active_sessions} 会话` : ''}</Tag>;
+        if (record.credential_valid === 0) return <Tag color="error">凭据失效</Tag>;
+        return <Tag>尚未检查</Tag>;
+      },
     },
   ];
 
@@ -174,6 +195,12 @@ const Dashboard: React.FC = () => {
           <div>
             <div className="jc-banner-sub">JoyCode API 代理服务 · 数据概览</div>
             <div className="jc-banner-title">系统运行状态</div>
+            <Space size={8} style={{ marginTop: 8 }}>
+              <Button size="small" icon={<ReloadOutlined spin={refreshing} />} onClick={() => fetchData()} disabled={refreshing}>刷新</Button>
+              <Typography.Text style={{ color: 'rgba(255,255,255,.72)', fontSize: 12 }}>
+                {refreshError || (lastUpdated ? `更新于 ${lastUpdated.toLocaleTimeString()}` : '正在加载')}
+              </Typography.Text>
+            </Space>
           </div>
           <div className="jc-kpi-grid" style={{ flex: 1, maxWidth: 720 }}>
             <div className="jc-kpi jc-kpi-accent">

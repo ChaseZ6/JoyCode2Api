@@ -108,6 +108,13 @@ export interface RequestLog {
   created_at: string;
 }
 
+export interface LogQuery { limit?: number; offset?: number; kind?: 'all' | 'stream' | 'error'; model?: string; endpoint?: string }
+export interface PaginatedLogs { logs: RequestLog[]; total: number; limit: number; offset: number; has_more: boolean }
+export interface HealthResponse {
+  status: string; accounts: number; version?: string; readiness?: 'ready' | 'degraded' | 'unconfigured' | 'error'; degraded?: boolean;
+  account_health?: { configured: number; credentials_valid: number; credentials_invalid: number; credentials_unknown: number; active_accounts: number; active_sessions: number };
+}
+
 const TOKEN_KEY = 'joycode_jwt';
 
 function getToken(): string | null {
@@ -196,7 +203,7 @@ export const api = {
   getSettings: () => request<{ settings: Settings }>('/api/settings').then(r => r.settings),
   updateSettings: (data: Settings) =>
     request<{ ok: boolean }>('/api/settings', { method: 'PUT', body: JSON.stringify(data) }),
-  getHealth: () => request<{ status: string; accounts: number }>('/api/health'),
+  getHealth: () => request<HealthResponse>('/api/health'),
   updateAccountModel: (userId: string, defaultModel: string) =>
     request<{ ok: boolean }>(`/api/accounts/${encodeURIComponent(userId)}/model`, {
       method: 'PUT',
@@ -204,8 +211,12 @@ export const api = {
     }),
   getAccountStats: (userId: string) =>
     request<AccountStats>(`/api/accounts/${encodeURIComponent(userId)}/stats`),
-  getAccountLogs: (userId: string, limit = 200) =>
-    request<{ logs: RequestLog[]; total: number }>(`/api/accounts/${encodeURIComponent(userId)}/logs?limit=${limit}`),
+  getAccountLogs: (userId: string, query: number | LogQuery = 20) => {
+    const options: LogQuery = typeof query === 'number' ? { limit: query } : query;
+    const params = new URLSearchParams();
+    Object.entries(options).forEach(([key, value]) => { if (value !== undefined && value !== '') params.set(key, String(value)); });
+    return request<PaginatedLogs>(`/api/accounts/${encodeURIComponent(userId)}/logs?${params.toString()}`);
+  },
   renewToken: (userId: string) =>
     request<{ ok: boolean; api_token: string }>(`/api/accounts/${encodeURIComponent(userId)}/renew-token`, { method: 'POST' }),
   autoLogin: () =>

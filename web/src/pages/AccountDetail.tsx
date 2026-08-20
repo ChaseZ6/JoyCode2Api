@@ -84,7 +84,11 @@ const AccountDetail: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [modelLoading, setModelLoading] = useState(false);
   const [savingModel, setSavingModel] = useState(false);
-  const [logFilter, setLogFilter] = useState<string>('all');
+  const [logFilter, setLogFilter] = useState<'all' | 'stream' | 'error'>('all');
+  const [logPage, setLogPage] = useState(1);
+  const [logPageSize, setLogPageSize] = useState(20);
+  const [logTotal, setLogTotal] = useState(0);
+  const [logLoading, setLogLoading] = useState(false);
   const [activeSessions, setActiveSessions] = useState(0);
 
   const decodedKey = userId ? decodeURIComponent(userId) : '';
@@ -92,15 +96,13 @@ const AccountDetail: React.FC = () => {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [accounts, statsData, logsData] = await Promise.all([
+      const [accounts, statsData] = await Promise.all([
         api.listAccounts(),
         api.getAccountStats(decodedKey),
-        api.getAccountLogs(decodedKey, 500),
       ]);
       const acc = accounts.find((a) => a.user_id === decodedKey);
       setAccount(acc || null);
       setStats(statsData);
-      setLogs(logsData.logs || []);
     } catch (e: unknown) {
       message.error(e instanceof Error ? e.message : '加载失败');
     } finally {
@@ -120,8 +122,24 @@ const AccountDetail: React.FC = () => {
     }
   };
 
+  const fetchLogs = async () => {
+    setLogLoading(true);
+    try {
+      const data = await api.getAccountLogs(decodedKey, {
+        limit: logPageSize, offset: (logPage - 1) * logPageSize, kind: logFilter,
+      });
+      setLogs(data.logs || []);
+      setLogTotal(data.total);
+    } catch (e: unknown) {
+      message.error(e instanceof Error ? e.message : '请求日志加载失败');
+    } finally {
+      setLogLoading(false);
+    }
+  };
+
   useEffect(() => { fetchData(); }, [decodedKey]);
   useEffect(() => { fetchModels(); }, [decodedKey]);
+  useEffect(() => { fetchLogs(); }, [decodedKey, logPage, logPageSize, logFilter]);
 
   // Daily aggregates use the local calendar day. Refresh only the stats just
   // after local midnight so an open page resets without reloading 500 log rows.
@@ -196,12 +214,6 @@ const AccountDetail: React.FC = () => {
   const allModelOptions = models.length > 0
     ? models.map((m) => ({ label: m.name || m.id, value: m.id }))
     : BUILTIN_MODELS;
-
-  const filteredLogs = logFilter === 'all'
-    ? logs
-    : logFilter === 'errors'
-      ? logs.filter((l) => l.status_code >= 400)
-      : logs.filter((l) => l.stream);
 
   const endpointData = stats?.by_endpoint.map((e) => ({
     name: e.endpoint.replace('/v1/', ''),
@@ -657,21 +669,27 @@ const AccountDetail: React.FC = () => {
           <Segmented
             size="small"
             value={logFilter}
-            onChange={(v) => setLogFilter(v as string)}
+            onChange={(v) => { setLogFilter(v as 'all' | 'stream' | 'error'); setLogPage(1); }}
             options={[
               { label: '全部', value: 'all' },
               { label: '流式', value: 'stream' },
-              { label: '错误', value: 'errors' },
+              { label: '错误', value: 'error' },
             ]}
           />
         }
       >
         <Table
-          dataSource={filteredLogs}
+          dataSource={logs}
           columns={logColumns}
+          loading={logLoading}
           rowKey="id"
           size="small"
-          pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (t) => `共 ${t} 条` }}
+          pagination={{
+            current: logPage, pageSize: logPageSize, total: logTotal,
+            showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100],
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (page, size) => { setLogPage(page); setLogPageSize(size); },
+          }}
           scroll={{ x: 980 }}
           locale={{ emptyText: '暂无请求记录' }}
           expandable={{

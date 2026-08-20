@@ -646,3 +646,42 @@ func TestServeStaticAssetStillWorksAfterAPICheck(t *testing.T) {
 		t.Errorf("asset should still be served, got: %s", w.Body.String())
 	}
 }
+
+func TestHandleAccountLogsPagination(t *testing.T) {
+	h, s := setupTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	s.AddAccount("key1", "pt1", "user1", true, "")
+	for i := 0; i < 5; i++ {
+		s.LogRequest("key1", "M", "/responses", i%2 == 0, 200, 1, "", 1, 1)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/key1/logs?limit=2&offset=2&kind=all", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeJSON(t, rec)
+	if body["total"] != float64(5) || body["has_more"] != true || len(body["logs"].([]interface{})) != 2 {
+		t.Fatalf("body=%v", body)
+	}
+}
+
+func TestHandleHealthAccountSemantics(t *testing.T) {
+	h, s := setupTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	s.AddAccount("key1", "pt1", "user1", true, "")
+	s.SetCredentialValid("key1", false)
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	body := decodeJSON(t, rec)
+	if body["status"] != "ok" || body["readiness"] != "degraded" || body["accounts"] != float64(1) {
+		t.Fatalf("body=%v", body)
+	}
+	health := body["account_health"].(map[string]interface{})
+	if health["credentials_invalid"] != float64(1) {
+		t.Fatalf("health=%v", health)
+	}
+}
