@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
@@ -275,5 +276,124 @@ func TestTranslateResponsesReqToChat_DropsToolChoiceWithOnlyBuiltinTools(t *test
 	}
 	if _, exists := chat["tool_choice"]; exists {
 		t.Errorf("tool_choice without function tools should be omitted: %v", chat["tool_choice"])
+	}
+}
+
+// TestChatFallbackStream_TruncatedToolArgumentsFallBackToEmptyObject covers a
+// finish_reason=length truncation that lands mid-arguments: the emitted
+// function_call must carry valid JSON ("{}") rather than partial JSON that
+// Codex would fail to parse.
+func TestChatFallbackStream_TruncatedToolArgumentsFallBackToEmptyObject(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{kimiModel()})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		chunks := []string{
+			`{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":[\"ls"}}]}}]}`,
+			`{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}`,
+		}
+		for _, c := range chunks {
+			io.WriteString(w, "data: "+c+"\n\n")
+			flusher.Flush()
+		}
+		io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"Kimi-K3","input":"list files","stream":true}`))
+	req = store.InitTokenUsage(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var incomplete map[string]interface{}
+	for _, ev := range collectSSE(rec.Body.String()) {
+		if ev["type"] == "response.incomplete" {
+			incomplete, _ = ev["response"].(map[string]interface{})
+		}
+	}
+	if incomplete == nil {
+		t.Fatalf("expected response.incomplete for length finish, got:\n%s", rec.Body.String())
+	}
+	output, _ := incomplete["output"].([]interface{})
+	if len(output) != 1 {
+		t.Fatalf("output items = %v", output)
+	}
+	fc, _ := output[0].(map[string]interface{})
+	args, _ := fc["arguments"].(string)
+	if args != "{}" {
+		t.Errorf("truncated arguments must degrade to {}, got %q", args)
+	}
+	if !json.Valid([]byte(args)) {
+		t.Errorf("arguments are not valid JSON: %q", args)
+	}
+}
+
+// TestChatFallbackNonStream_RetriesTransientFailures verifies the bridged
+// non-stream path retries transient upstream errors (5xx) instead of failing
+// the Codex request on the first attempt.
+func TestChatFallbackNonStream_RetriesTransientFailures(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{kimiModel()})
+	var calls int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := atomic.AddInt32(&calls, 1)
+		if attempt < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			io.WriteString(w, `{"error":"upstream temporarily unavailable"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"c1","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"Kimi-K3","input":"hi"}`))
+	req = store.InitTokenUsage(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s (attempts=%d)", rec.Code, rec.Body.String(), calls)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("expected 3 upstream attempts, got %d", got)
+	}
+}
+
+// TestChatFallbackNonStream_NoRetryOnBadRequest verifies deterministic 400
+// errors are surfaced immediately without burning retry attempts.
+func TestChatFallbackNonStream_NoRetryOnBadRequest(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{kimiModel()})
+	var calls int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":"invalid request"}`)
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"Kimi-K3","input":"hi"}`))
+	req = store.InitTokenUsage(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("400 must not be retried, got %d attempts", got)
 	}
 }

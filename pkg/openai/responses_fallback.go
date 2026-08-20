@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -21,7 +22,32 @@ import (
 // upstream chat-completions endpoint and re-wrapping the answer as a
 // Responses object.
 func (s *Server) handleResponsesViaChatNonStream(w http.ResponseWriter, r *http.Request, client *joycode.Client, chatBody map[string]interface{}, displayName string) {
-	resp, err := client.PostContext(r.Context(), "/api/saas/openai/v1/chat/completions", chatBody)
+	maxRetries := 3
+	if s.store != nil {
+		maxRetries = s.store.GetIntSetting("max_retries", 3)
+	}
+	var resp map[string]interface{}
+	var err error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err = client.PostContext(r.Context(), "/api/saas/openai/v1/chat/completions", chatBody)
+		if err == nil {
+			break
+		}
+		// Deterministic client-side failures (bad request, content filter) will
+		// fail identically on retry — only transient errors are worth another
+		// attempt.
+		if status := upstreamHTTPStatus(err); status == http.StatusBadRequest {
+			break
+		}
+		slog.Error("responses->chat non-stream upstream error", "model", displayName, "attempt", attempt, "max", maxRetries, "error", err)
+		if attempt < maxRetries {
+			select {
+			case <-r.Context().Done():
+				break
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
+		}
+	}
 	if err != nil {
 		status := upstreamHTTPStatus(err)
 		copyRetryAfter(w, err)
@@ -131,7 +157,7 @@ func chatMessageToResponsesItems(message map[string]interface{}) []map[string]in
 			if callID == "" {
 				callID = "call_" + newShortID()
 			}
-			if args == "" {
+			if args == "" || !json.Valid([]byte(args)) {
 				args = "{}"
 			}
 			items = append(items, map[string]interface{}{
@@ -500,16 +526,23 @@ func (s *responsesFromChatStreamState) complete() {
 		tool := s.tools[idx]
 		if tool.Announced && !tool.ArgsDone {
 			tool.ArgsDone = true
+			args := tool.Args.String()
+			if !json.Valid([]byte(args)) {
+				// A truncated upstream (e.g. finish_reason=length mid-arguments)
+				// leaves partial JSON. Codex parses arguments strictly, so
+				// degrade to an empty object rather than emitting broken JSON.
+				args = "{}"
+			}
 			s.emit("response.function_call_arguments.done", map[string]interface{}{
 				"item_id": tool.ItemID, "output_index": tool.OutputIndex,
-				"arguments": tool.Args.String(),
+				"arguments": args,
 			})
 			s.emit("response.output_item.done", map[string]interface{}{
 				"output_index": tool.OutputIndex,
 				"item": map[string]interface{}{
 					"id": tool.ItemID, "type": "function_call",
 					"call_id": tool.CallID, "name": tool.Name,
-					"arguments": tool.Args.String(), "status": "completed",
+					"arguments": args, "status": "completed",
 				},
 			})
 		}
@@ -577,10 +610,14 @@ func (s *responsesFromChatStreamState) finalOutputItems() []map[string]interface
 		if !tool.Announced {
 			continue
 		}
+		args := tool.Args.String()
+		if !json.Valid([]byte(args)) {
+			args = "{}"
+		}
 		parts = append(parts, indexed{tool.OutputIndex, map[string]interface{}{
 			"id": tool.ItemID, "type": "function_call",
 			"call_id": tool.CallID, "name": tool.Name,
-			"arguments": tool.Args.String(), "status": "completed",
+			"arguments": args, "status": "completed",
 		}})
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].idx < parts[j].idx })

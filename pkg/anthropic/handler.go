@@ -191,8 +191,10 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 		jcResp, lastErr = client.PostContext(r.Context(), chatEndpoint, jcBody)
 		if lastErr != nil {
 			if isContextLimitError(lastErr.Error()) {
-				// Progressive truncation on context limit
-				if truncateMessages(req) {
+				// Progressive truncation on context limit. Route through
+				// PreemptiveTruncate so the output-token budget (max_tokens)
+				// is accounted for the same way as in preflight truncation.
+				if rounds := PreemptiveTruncate(req); rounds > 0 {
 					jcBody = TranslateRequest(req, store.GetAccountDefaultModel(r), systemDefault)
 					reqLog(r).Warn("retrying with truncated messages (non-stream)", "attempt", attempt)
 					continue
@@ -345,7 +347,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	resp, err := h.connectStreamWithRetry(r, jcBody, client)
 	for truncRound := 0; err != nil && isContextLimitError(err.Error()) && truncRound < maxTruncationRounds; truncRound++ {
 		reqLog(r).Warn("stream context limit, truncating", "round", truncRound+1)
-		if !truncateMessages(req) {
+		if rounds := PreemptiveTruncate(req); rounds <= 0 {
 			break
 		}
 		jcBody = TranslateRequest(req, store.GetAccountDefaultModel(r), systemDefault)
@@ -378,11 +380,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	defer resp.Body.Close()
 
 	type toolCallAccum struct {
-		ID            string
-		Name          string
-		Arguments     string
-		ArgumentsSent bool
-		blockIdx      int
+		ID        string
+		Name      string
+		Arguments string
+		// opened marks that this tool has had at least one content block;
+		// reopening after an interleaved interruption replays Arguments.
+		opened   bool
+		blockIdx int
 	}
 	toolCalls := make(map[int]*toolCallAccum)
 	currentBlockIndex := 0
@@ -512,8 +516,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			// close the open block and (re)open one for this tool index.
 			if openIsText || (tcAccum.blockIdx != openBlock) {
 				closeOpenBlock()
-				openToolBlock(idx, tcAccum.ArgumentsSent)
+				openToolBlock(idx, tcAccum.opened)
 				tcAccum.blockIdx = openBlock
+				tcAccum.opened = true
 			}
 			if tc.Function.Arguments != "" {
 				FormatSSE(w, "content_block_delta", sseContentBlockDelta{
@@ -522,7 +527,6 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 					Delta: deltaText{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
 				})
 				flusher.Flush()
-				tcAccum.ArgumentsSent = true
 			}
 		}
 
