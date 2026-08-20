@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Layout, Menu, Typography, Tag, theme, Tooltip, Button, message } from 'antd';
+import { Layout, Menu, Typography, Tag, theme, Tooltip, Button, message, Drawer, Grid } from 'antd';
 import {
   DashboardOutlined,
   TeamOutlined,
@@ -8,12 +8,14 @@ import {
   GithubOutlined,
   StarFilled,
   LogoutOutlined,
+  MenuOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import useDocumentTitle from '../hooks/useDocumentTitle';
 import { api, clearToken } from '../api';
 
 const { Header, Sider, Content } = Layout;
+const { useBreakpoint } = Grid;
 const { Text } = Typography;
 
 const menuItems = [
@@ -26,6 +28,9 @@ const COLLAPSED_KEY = 'joycode_sider_collapsed';
 
 const MainLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === 'true');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const screens = useBreakpoint();
+  const isMobile = !screens.md;
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
@@ -61,43 +66,31 @@ const MainLayout: React.FC = () => {
     : location.pathname.startsWith('/settings') ? '/settings'
     : '/dashboard';
 
+  const navigationMenu = (
+    <Menu mode="inline" selectedKeys={[selectedKey]} items={menuItems}
+      onClick={({ key }) => { navigate(key); setMobileMenuOpen(false); }} />
+  );
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Sider
-        collapsible
-        collapsed={collapsed}
-        onCollapse={(val) => { setCollapsed(val); localStorage.setItem(COLLAPSED_KEY, String(val)); }}
-        width={220}
-      >
-        <div style={{
-          height: 56,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: collapsed ? 'center' : 'flex-start',
-          padding: collapsed ? 0 : '0 20px',
-          borderBottom: `1px solid ${token.colorBorderSecondary}`,
-          gap: 10,
-        }}>
-          <div style={{
-            width: 28, height: 28, borderRadius: 8, flexShrink: 0,
-            background: 'linear-gradient(135deg, #22C55E, #16A34A)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 2px 8px rgba(34, 197, 94, 0.3)',
-          }}>
-            <img src="/favicon.ico" alt="JoyCode" style={{ width: 18, height: 18, filter: 'brightness(0) invert(1)' }} />
+      {!isMobile && (
+        <Sider collapsible collapsed={collapsed}
+          onCollapse={(val) => { setCollapsed(val); localStorage.setItem(COLLAPSED_KEY, String(val)); }} width={220}>
+          <div className="jc-brand" style={{ justifyContent: collapsed ? 'center' : 'flex-start', padding: collapsed ? 0 : '0 20px' }}>
+            <div className="jc-brand-icon"><img src="/favicon.ico" alt="JoyCode" /></div>
+            {!collapsed && <Text strong style={{ fontSize: 14, letterSpacing: 0.2 }}>JoyCode 代理</Text>}
           </div>
-          {!collapsed && <Text strong style={{ fontSize: 14, letterSpacing: 0.2 }}>JoyCode 代理</Text>}
-        </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[selectedKey]}
-          items={menuItems}
-          onClick={({ key }) => navigate(key)}
-        />
-      </Sider>
+          {navigationMenu}
+        </Sider>
+      )}
+      <Drawer title="JoyCode 代理" placement="left" width={260} open={isMobile && mobileMenuOpen}
+        onClose={() => setMobileMenuOpen(false)} styles={{ body: { padding: 0 } }}>
+        {navigationMenu}
+      </Drawer>
       <Layout>
         <Header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            {isMobile && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileMenuOpen(true)} aria-label="打开导航" />}
             <Tag color={healthStatus === 'ok' ? 'success' : healthStatus === 'degraded' ? 'warning' : healthStatus === 'loading' ? 'default' : 'error'} icon={<CheckCircleOutlined />}>
               {healthStatus === 'ok' ? '代理服务正常' : healthStatus === 'degraded' ? '账号状态需关注' : healthStatus === 'loading' ? '检查服务状态' : '服务异常'}
             </Tag>

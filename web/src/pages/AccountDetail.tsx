@@ -3,6 +3,7 @@ import {
   Card, Row, Col, Statistic, Typography, Skeleton, Tag, Select, Button,
   message, Space, Table, Badge, Segmented, Popconfirm, Tooltip, Divider,
 } from 'antd';
+import type { TableColumnsType } from 'antd';
 import {
   ArrowLeftOutlined, ApiOutlined, ThunderboltOutlined,
   CheckCircleOutlined, ReloadOutlined,
@@ -220,7 +221,7 @@ const AccountDetail: React.FC = () => {
     value: e.count,
   })) || [];
 
-  const logColumns = [
+  const logColumns: TableColumnsType<RequestLog> = [
     {
       title: '时间',
       dataIndex: 'created_at',
@@ -237,6 +238,7 @@ const AccountDetail: React.FC = () => {
       dataIndex: 'endpoint',
       key: 'endpoint',
       width: 200,
+      responsive: ['sm'],
       render: (ep: string) => (
         <Typography.Text code style={{ fontSize: 12 }}>{ep}</Typography.Text>
       ),
@@ -254,6 +256,7 @@ const AccountDetail: React.FC = () => {
       dataIndex: 'stream',
       key: 'stream',
       width: 60,
+      responsive: ['md'],
       render: (s: boolean) => s
         ? <Badge status="processing" text="" />
         : <Badge status="default" text="" />,
@@ -270,6 +273,7 @@ const AccountDetail: React.FC = () => {
       dataIndex: 'input_tokens',
       key: 'input',
       width: 80,
+      responsive: ['md'],
       sorter: (a: RequestLog, b: RequestLog) => a.input_tokens - b.input_tokens,
       render: (n: number) => (
         <Typography.Text style={{ fontSize: 12, fontFamily: 'monospace' }}>
@@ -282,6 +286,7 @@ const AccountDetail: React.FC = () => {
       dataIndex: 'output_tokens',
       key: 'output',
       width: 80,
+      responsive: ['md'],
       sorter: (a: RequestLog, b: RequestLog) => a.output_tokens - b.output_tokens,
       render: (n: number) => (
         <Typography.Text style={{ fontSize: 12, fontFamily: 'monospace' }}>
@@ -294,6 +299,7 @@ const AccountDetail: React.FC = () => {
       dataIndex: 'latency_ms',
       key: 'latency',
       width: 100,
+      responsive: ['sm'],
       sorter: (a: RequestLog, b: RequestLog) => a.latency_ms - b.latency_ms,
       render: (ms: number) => (
         <Typography.Text style={{ color: latencyColor(ms), fontFamily: 'monospace', fontWeight: 500 }}>
