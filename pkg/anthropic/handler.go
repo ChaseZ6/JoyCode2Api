@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -383,12 +382,91 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		Name          string
 		Arguments     string
 		ArgumentsSent bool
+		blockIdx      int
 	}
 	toolCalls := make(map[int]*toolCallAccum)
 	currentBlockIndex := 0
-	textBlockStarted := false
-	toolBlockStarted := map[int]bool{}
-	toolBlockToIdx := map[int]int{}
+	// openBlock tracks the single currently-open content block (-1 = none).
+	// Anthropic requires blocks to be sequential: a block must be stopped
+	// before the next one starts, and deltas must target the open block.
+	// Interleaved upstream deltas (tool0, tool1, tool0...) are therefore
+	// re-chunked: a tool block is closed when the stream switches away from
+	// it, and reopened (with the arguments accumulated so far) if more
+	// deltas for the same tool index arrive later.
+	openBlock := -1
+	openIsText := false
+	toolBlockOpened := false
+	closeOpenBlock := func() {
+		if openBlock < 0 {
+			return
+		}
+		if !openIsText {
+			// Guarantee the tool_use input is valid JSON before the block
+			// closes: if the accumulated arguments are incomplete (truncated
+			// upstream) send a corrective "{}" so clients don't try to parse
+			// partial JSON. Valid partial deltas are left as-is.
+			for _, tc := range toolCalls {
+				if tc.blockIdx != openBlock {
+					continue
+				}
+				if !json.Valid([]byte(tc.Arguments)) {
+					FormatSSE(w, "content_block_delta", sseContentBlockDelta{
+						Type:  "content_block_delta",
+						Index: openBlock,
+						Delta: deltaText{Type: "input_json_delta", PartialJSON: "{}"},
+					})
+					tc.Arguments = "{}"
+				}
+				break
+			}
+		}
+		FormatSSE(w, "content_block_stop", sseContentBlockStop{
+			Type: "content_block_stop", Index: openBlock,
+		})
+		openBlock = -1
+		currentBlockIndex++
+	}
+	openTextBlock := func() {
+		openIsText = true
+		openBlock = currentBlockIndex
+		FormatSSE(w, "content_block_start", sseContentBlockStart{
+			Type:         "content_block_start",
+			Index:        currentBlockIndex,
+			ContentBlock: ContentBlock{Type: "text", Text: ""},
+		})
+		flusher.Flush()
+	}
+	openToolBlock := func(idx int, reopen bool) {
+		openIsText = false
+		openBlock = currentBlockIndex
+		tc := toolCalls[idx]
+		tcID := tc.ID
+		if tcID == "" {
+			tcID = "toolu_" + newID()
+			tc.ID = tcID
+		}
+		FormatSSE(w, "content_block_start", sseContentBlockStart{
+			Type:  "content_block_start",
+			Index: currentBlockIndex,
+			ContentBlock: ContentBlock{
+				Type:  "tool_use",
+				ID:    tcID,
+				Name:  tc.Name,
+				Input: json.RawMessage("{}"),
+			},
+		})
+		if reopen && tc.Arguments != "" {
+			// Replay the arguments accumulated before this block was closed so
+			// the client can continue appending new deltas to valid JSON.
+			FormatSSE(w, "content_block_delta", sseContentBlockDelta{
+				Type:  "content_block_delta",
+				Index: currentBlockIndex,
+				Delta: deltaText{Type: "input_json_delta", PartialJSON: tc.Arguments},
+			})
+		}
+		flusher.Flush()
+		toolBlockOpened = true
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -427,61 +505,37 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			if tc.Function.Name != "" {
 				toolCalls[idx].Name = tc.Function.Name
 			}
-			toolCalls[idx].Arguments += tc.Function.Arguments
-
-			if !toolBlockStarted[idx] {
-				if textBlockStarted {
-					FormatSSE(w, "content_block_stop", sseContentBlockStop{
-						Type: "content_block_stop", Index: currentBlockIndex,
-					})
-					currentBlockIndex++
-					textBlockStarted = false
-				}
-				toolBlockStarted[idx] = true
-				toolBlockToIdx[idx] = currentBlockIndex
-				tcID := toolCalls[idx].ID
-				if tcID == "" {
-					tcID = "toolu_" + newID()
-				}
-				FormatSSE(w, "content_block_start", sseContentBlockStart{
-					Type:  "content_block_start",
-					Index: currentBlockIndex,
-					ContentBlock: ContentBlock{
-						Type:  "tool_use",
-						ID:    tcID,
-						Name:  toolCalls[idx].Name,
-						Input: json.RawMessage("{}"),
-					},
-				})
-				flusher.Flush()
-				currentBlockIndex++
+			tcAccum := toolCalls[idx]
+			tcAccum.Arguments += tc.Function.Arguments
+			// A delta for a different tool than the open block, or for a tool
+			// whose block was already closed (interleaved upstream chunks):
+			// close the open block and (re)open one for this tool index.
+			if openIsText || (tcAccum.blockIdx != openBlock) {
+				closeOpenBlock()
+				openToolBlock(idx, tcAccum.ArgumentsSent)
+				tcAccum.blockIdx = openBlock
 			}
 			if tc.Function.Arguments != "" {
 				FormatSSE(w, "content_block_delta", sseContentBlockDelta{
 					Type:  "content_block_delta",
-					Index: toolBlockToIdx[idx],
+					Index: openBlock,
 					Delta: deltaText{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
 				})
 				flusher.Flush()
-				toolCalls[idx].ArgumentsSent = true
+				tcAccum.ArgumentsSent = true
 			}
 		}
 
 		text := choice.Delta.Content
 		if text != "" {
-			if !textBlockStarted {
-				textBlockStarted = true
-				FormatSSE(w, "content_block_start", sseContentBlockStart{
-					Type:         "content_block_start",
-					Index:        currentBlockIndex,
-					ContentBlock: ContentBlock{Type: "text", Text: ""},
-				})
-				flusher.Flush()
+			if !openIsText || openBlock < 0 {
+				closeOpenBlock()
+				openTextBlock()
 			}
 			totalOutput += len(text)
 			FormatSSE(w, "content_block_delta", sseContentBlockDelta{
 				Type:  "content_block_delta",
-				Index: currentBlockIndex,
+				Index: openBlock,
 				Delta: deltaText{Type: "text_delta", Text: text},
 			})
 			flusher.Flush()
@@ -493,42 +547,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			reqLog(r).Info("stream completed", "chunks", chunkCount, "reason", fr, "tools", len(toolCalls))
 
 			// Ensure at least one content block exists — Anthropic SDK requires it
-			if !textBlockStarted && len(toolBlockStarted) == 0 {
-				textBlockStarted = true
-				FormatSSE(w, "content_block_start", sseContentBlockStart{
-					Type:         "content_block_start",
-					Index:        currentBlockIndex,
-					ContentBlock: ContentBlock{Type: "text", Text: ""},
-				})
-				flusher.Flush()
+			if openBlock < 0 && currentBlockIndex == 0 && !toolBlockOpened {
+				openTextBlock()
 			}
 
-			if textBlockStarted {
-				FormatSSE(w, "content_block_stop", sseContentBlockStop{
-					Type: "content_block_stop", Index: currentBlockIndex,
-				})
-				currentBlockIndex++
-				textBlockStarted = false
-			}
-			toolIndexes := make([]int, 0, len(toolCalls))
-			for idx := range toolCalls {
-				toolIndexes = append(toolIndexes, idx)
-			}
-			sort.Ints(toolIndexes)
-			for _, idx := range toolIndexes {
-				if toolBlockStarted[idx] {
-					if !toolCalls[idx].ArgumentsSent {
-						FormatSSE(w, "content_block_delta", sseContentBlockDelta{
-							Type:  "content_block_delta",
-							Index: toolBlockToIdx[idx],
-							Delta: deltaText{Type: "input_json_delta", PartialJSON: "{}"},
-						})
-					}
-					FormatSSE(w, "content_block_stop", sseContentBlockStop{
-						Type: "content_block_stop", Index: toolBlockToIdx[idx],
-					})
-				}
-			}
+			closeOpenBlock()
 
 			if fr == "content_filter" {
 				// Don't disguise a filter-truncated turn as a clean end_turn
@@ -566,20 +589,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	// is true the loop already emitted message_stop, so a trailing read error after
 	// a complete answer is ignored.
 	if !finishReasonSeen {
-		if textBlockStarted {
-			FormatSSE(w, "content_block_stop", sseContentBlockStop{
-				Type: "content_block_stop", Index: currentBlockIndex,
-			})
-			currentBlockIndex++
-			textBlockStarted = false
-		}
-		for i := 0; i < len(toolCalls); i++ {
-			if toolBlockStarted[i] {
-				FormatSSE(w, "content_block_stop", sseContentBlockStop{
-					Type: "content_block_stop", Index: toolBlockToIdx[i],
-				})
-			}
-		}
+		closeOpenBlock()
 		if err := scanner.Err(); err != nil {
 			reqLog(r).Error("stream ended abnormally before finish_reason", "error", err, "chunks", chunkCount)
 			store.SetRequestError(r, http.StatusBadGateway, "stream_read_error: "+err.Error())
