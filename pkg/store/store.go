@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -188,7 +189,7 @@ func Open(dbPath string) (*Store, error) {
 	}
 
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
@@ -236,6 +237,9 @@ func generateToken() string {
 }
 
 func (s *Store) migrate() error {
+	if err := s.initMigrationTable(); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS accounts (
 			user_id TEXT PRIMARY KEY,
@@ -292,8 +296,12 @@ func (s *Store) migrate() error {
 	// Migration: migrate old schema (api_key as PK) to new schema (user_id as PK)
 	s.migrateUserIDAsPK()
 
-	// Migration: fix historical UTC timestamps to localtime
-	s.migrateUTCTimestamps()
+	// Historical timestamps are treated as local wall-clock values. Previous
+	// versions guessed UTC from data age and could shift a quiet database twice;
+	// record an explicit baseline instead of mutating user data heuristically.
+	if err := s.recordMigration(1, "legacy_localtime_baseline"); err != nil {
+		return err
+	}
 
 	// Migration: initialize display_order for existing accounts
 	s.migrateDisplayOrder()
@@ -308,6 +316,38 @@ func (s *Store) migrate() error {
 		slog.Warn("store: create request_logs indexes failed", "error", err)
 	}
 
+	return nil
+}
+
+const currentSchemaVersion = 1
+
+func (s *Store) initMigrationTable() error {
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+		)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+	var version int
+	if err := s.db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version > currentSchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than supported version %d", version, currentSchemaVersion)
+	}
+	return nil
+}
+
+func (s *Store) recordMigration(version int, name string) error {
+	if version > currentSchemaVersion {
+		return fmt.Errorf("migration version %d exceeds current schema version", version)
+	}
+	_, err := s.db.Exec("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", version, name)
+	if err != nil {
+		return fmt.Errorf("record migration %d (%s): %w", version, name, err)
+	}
 	return nil
 }
 
@@ -430,86 +470,6 @@ func (s *Store) migrateUserIDAsPK() {
 	slog.Info("store: accounts table migrated to user_id PK successfully")
 }
 
-// migrateUTCTimestamps converts existing UTC timestamps to localtime.
-//
-// Heuristic: if the newest request_log's created_at is roughly |offset| hours
-// behind (positive offset) or ahead (negative offset) of current localtime,
-// the data was stored in UTC and needs to be shifted by the offset.
-//
-// The check is against the NEWEST record so the migration is idempotent:
-// after shifting, the newest record sits at localtime and won't match again.
-// Supports non-integer-hour offsets (e.g. UTC+5:30) via fractional hours.
-func (s *Store) migrateUTCTimestamps() {
-	_, offset := time.Now().Zone()
-	if offset == 0 {
-		return
-	}
-	hours := float64(offset) / 3600.0
-	absHours := hours
-	if absHours < 0 {
-		absHours = -absHours
-	}
-	// SQLite datetime modifiers accept fractional hours, e.g. "+8.5 hours".
-	// Format with enough precision for any real-world timezone offset.
-	shift := fmt.Sprintf("%+g hours", hours)
-
-	// Find the newest record. If it's more than ~30min off from localtime in
-	// the direction of the offset, treat all existing data as UTC-stored.
-	var newest string
-	err := s.db.QueryRow("SELECT MAX(created_at) FROM request_logs").Scan(&newest)
-	if err != nil || newest == "" {
-		return
-	}
-
-	// diffExpr = localtime_now - newest (in hours, as a float string).
-	// For UTC+8 with UTC-stored data: newest is ~8h behind → diff ≈ +8.
-	// For UTC-5 with UTC-stored data: newest is ~5h ahead  → diff ≈ -5.
-	// We trigger when |diff| > (absHours - 0.5), i.e. the gap is close to the
-	// full offset and can't be explained by normal time passage.
-	var diff float64
-	err = s.db.QueryRow(
-		"SELECT (strftime('%s','now','localtime') - strftime('%s', ?)) / 3600.0",
-		newest,
-	).Scan(&diff)
-	if err != nil {
-		slog.Warn("migrateUTCTimestamps: diff query failed", "error", err)
-		return
-	}
-	// Same-sign check: positive offset expects positive diff (UTC behind local),
-	// negative offset expects negative diff (UTC ahead of local).
-	if (hours > 0 && diff < absHours-0.5) || (hours < 0 && diff > -absHours+0.5) {
-		return
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		slog.Warn("migrateUTCTimestamps: begin tx failed", "error", err)
-		return
-	}
-	defer tx.Rollback()
-
-	var fixed int64
-	for _, q := range []string{
-		"UPDATE request_logs SET created_at = datetime(created_at, '" + shift + "')",
-		"UPDATE accounts SET created_at = datetime(created_at, '" + shift + "')",
-		"UPDATE settings SET updated_at = datetime(updated_at, '" + shift + "')",
-	} {
-		res, err := tx.Exec(q)
-		if err != nil {
-			slog.Warn("migrateUTCTimestamps: update failed", "query", q, "error", err)
-			return
-		}
-		if n, err := res.RowsAffected(); err == nil {
-			fixed += n
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		slog.Warn("migrateUTCTimestamps: commit failed", "error", err)
-		return
-	}
-	slog.Info("migrated UTC timestamps to localtime", "offset_hours", hours, "records_fixed", fixed)
-}
-
 func (s *Store) migrateDisplayOrder() {
 	var count int
 	s.db.QueryRow("SELECT COUNT(*) FROM accounts WHERE display_order = 0").Scan(&count)
@@ -538,21 +498,73 @@ func (s *Store) migrateDisplayOrder() {
 
 func (s *Store) loadOrCreateEncKey(dir string) ([]byte, error) {
 	keyPath := filepath.Join(dir, encKeyFile)
-	data, err := os.ReadFile(keyPath)
+	key, err := readEncKey(keyPath)
 	if err == nil {
-		key, err := hex.DecodeString(string(data))
-		if err == nil && len(key) == 32 {
-			return key, nil
-		}
+		return key, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("existing key is unreadable or invalid; restore %s from backup instead of replacing it: %w", keyPath, err)
 	}
 
-	key := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+	candidate := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, candidate); err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
-
-	if err := os.WriteFile(keyPath, []byte(hex.EncodeToString(key)), 0600); err != nil {
+	file, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return readEncKey(keyPath)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("create key: %w", err)
+	}
+	complete := false
+	defer func() {
+		file.Close()
+		if !complete {
+			os.Remove(keyPath)
+		}
+	}()
+	encoded := []byte(hex.EncodeToString(candidate))
+	if _, err := file.Write(encoded); err != nil {
 		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return nil, fmt.Errorf("sync key: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return nil, fmt.Errorf("close key: %w", err)
+	}
+	complete = true
+	return candidate, nil
+}
+
+func readEncKey(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("key path is not a regular file")
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		if err := os.Chmod(path, 0600); err != nil {
+			return nil, fmt.Errorf("restrict key permissions: %w", err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSuffix(string(data), "\n")
+	if len(text) != 64 {
+		return nil, fmt.Errorf("invalid key length: got %d hex characters, want 64", len(text))
+	}
+	key, err := hex.DecodeString(text)
+	if err != nil {
+		return nil, fmt.Errorf("decode key: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid decoded key length: %d", len(key))
 	}
 	return key, nil
 }
@@ -1488,7 +1500,7 @@ func EnsureDataDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(home, DefaultDBDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
 	return dir, nil

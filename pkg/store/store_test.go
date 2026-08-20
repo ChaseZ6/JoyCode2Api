@@ -1,8 +1,12 @@
 package store
 
 import (
+	"bytes"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -604,5 +608,136 @@ func TestGetAccountStats_UsesCalendarDayAndRollingHourlyWindow(t *testing.T) {
 	}
 	if _, exists := hourly["08-12 00"]; exists {
 		t.Errorf("rolling hourly includes tomorrow record: %#v", hourly)
+	}
+}
+
+func TestEncryptionKey_InvalidExistingFileIsNotOverwritten(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, encKeyFile)
+	original := []byte("corrupt-key")
+	if err := os.WriteFile(keyPath, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{}
+	if _, err := s.loadOrCreateEncKey(dir); err == nil {
+		t.Fatal("expected invalid existing key to fail")
+	}
+	got, _ := os.ReadFile(keyPath)
+	if !bytes.Equal(got, original) {
+		t.Fatalf("invalid key was overwritten: %q", got)
+	}
+}
+
+func TestEncryptionKey_RejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte(strings.Repeat("0", 64)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, encKeyFile)); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := (&Store{}).loadOrCreateEncKey(dir); err == nil {
+		t.Fatal("expected symlink key path to be rejected")
+	}
+}
+
+func TestEncryptionKey_ConcurrentCreationUsesSingleKey(t *testing.T) {
+	dir := t.TempDir()
+	const workers = 16
+	results := make(chan []byte, workers)
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			key, err := (&Store{}).loadOrCreateEncKey(dir)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- key
+		}()
+	}
+	var first []byte
+	for i := 0; i < workers; i++ {
+		select {
+		case err := <-errs:
+			t.Fatal(err)
+		case key := <-results:
+			if first == nil {
+				first = key
+			} else if !bytes.Equal(first, key) {
+				t.Fatal("concurrent creators returned different keys")
+			}
+		}
+	}
+	info, err := os.Stat(filepath.Join(dir, encKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Errorf("key permissions = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestEncryptionKey_RestrictsExistingPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, encKeyFile)
+	if err := os.WriteFile(path, []byte(strings.Repeat("0", 64)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Store{}).loadOrCreateEncKey(dir); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("permissions = %o", info.Mode().Perm())
+	}
+}
+
+func TestSchemaMigrationBaselineIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "proxy.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version=1 AND name='legacy_localtime_baseline'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("migration count=%d", count)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version=1").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("migration repeated, count=%d", count)
+	}
+}
+
+func TestStoreRejectsNewerSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "proxy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT); INSERT INTO schema_migrations(version,name) VALUES (99,'future')")
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "newer than supported") {
+		t.Fatalf("Open error=%v", err)
 	}
 }
