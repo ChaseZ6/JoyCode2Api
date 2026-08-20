@@ -3,9 +3,32 @@ package joycode
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 )
+
+// HTTPError preserves an upstream non-2xx response for protocol-aware mapping.
+type HTTPError struct {
+	StatusCode int
+	Body       string
+	Header     http.Header
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Body)
+}
+
+func (e *HTTPError) RetryAfter() string {
+	if e.Header == nil {
+		return ""
+	}
+	return e.Header.Get("Retry-After")
+}
+
+func NewHTTPError(status int, body string, header http.Header) *HTTPError {
+	return &HTTPError{StatusCode: status, Body: body, Header: header.Clone()}
+}
 
 // UpstreamError is a business error returned inside an HTTP 200 response.
 // JoyCode uses several envelope shapes, so callers should use errors.As rather

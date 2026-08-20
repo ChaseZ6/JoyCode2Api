@@ -201,6 +201,7 @@ func connectUpstreamStream(
 				if committed {
 					writeSSEError(w, flusher, outcome.Err.Error(), "api_error", "upstream_error")
 				} else {
+					copyRetryAfter(w, outcome.Err)
 					writeOpenAIError(w, upstreamHTTPStatus(outcome.Err), outcome.Err.Error(), "api_error", "upstream_error", "")
 				}
 				return nil, committed

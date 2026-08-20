@@ -585,3 +585,15 @@ func TestUnknownV1_ReturnsJSON404(t *testing.T) {
 		t.Errorf("error = %#v", errBody)
 	}
 }
+
+func TestUpstreamHTTPStatusAndRetryAfter(t *testing.T) {
+	err := joycode.NewHTTPError(http.StatusTooManyRequests, `{"error":"rate limit"}`, http.Header{"Retry-After": []string{"12"}})
+	if got := upstreamHTTPStatus(err); got != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429", got)
+	}
+	rec := httptest.NewRecorder()
+	copyRetryAfter(rec, err)
+	if got := rec.Header().Get("Retry-After"); got != "12" {
+		t.Errorf("Retry-After = %q, want 12", got)
+	}
+}

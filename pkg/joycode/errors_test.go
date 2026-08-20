@@ -2,6 +2,7 @@ package joycode
 
 import (
 	"errors"
+	"net/http"
 	"testing"
 )
 
@@ -57,5 +58,17 @@ func TestDetectBusinessError(t *testing.T) {
 					upstream.Code, upstream.Message, tc.wantCode, tc.wantMessage)
 			}
 		})
+	}
+}
+
+func TestHTTPErrorPreservesStatusAndRetryAfter(t *testing.T) {
+	header := http.Header{"Retry-After": []string{"7"}, "X-Upstream": []string{"value"}}
+	err := NewHTTPError(http.StatusTooManyRequests, `{"error":"rate limit"}`, header)
+	header.Set("Retry-After", "changed")
+	if err.StatusCode != http.StatusTooManyRequests || err.RetryAfter() != "7" {
+		t.Errorf("HTTPError = %+v", err)
+	}
+	if err.Error() != `API error 429: {"error":"rate limit"}` {
+		t.Errorf("Error() = %q", err.Error())
 	}
 }

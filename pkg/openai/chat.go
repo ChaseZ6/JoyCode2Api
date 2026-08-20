@@ -78,6 +78,7 @@ func (s *Server) handleNonStreamChat(w http.ResponseWriter, r *http.Request, cli
 	if err != nil {
 		slog.Error("chat non-stream upstream error", "model", model, "error", err)
 		status := upstreamHTTPStatus(err)
+		copyRetryAfter(w, err)
 		errorType := "api_error"
 		code := "upstream_error"
 		if status == http.StatusBadRequest {

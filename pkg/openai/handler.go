@@ -82,12 +82,25 @@ func writeOpenAIError(w http.ResponseWriter, status int, message, errorType, cod
 	writeJSON(w, status, map[string]interface{}{"error": errBody})
 }
 
+func copyRetryAfter(w http.ResponseWriter, err error) {
+	var httpErr *joycode.HTTPError
+	if errors.As(err, &httpErr) {
+		if value := httpErr.RetryAfter(); value != "" {
+			w.Header().Set("Retry-After", value)
+		}
+	}
+}
+
 func upstreamHTTPStatus(err error) int {
 	if err == nil {
 		return http.StatusBadGateway
 	}
 	if isTimeoutError(err.Error()) {
 		return http.StatusGatewayTimeout
+	}
+	var httpErr *joycode.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode
 	}
 	var upstream *joycode.UpstreamError
 	if errors.As(err, &upstream) {

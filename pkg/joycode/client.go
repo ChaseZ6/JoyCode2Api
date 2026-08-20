@@ -386,7 +386,7 @@ func (c *Client) PostContext(ctx context.Context, endpoint string, body map[stri
 	}
 	if resp.StatusCode != 200 {
 		slog.Error("upstream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
+		return nil, NewHTTPError(resp.StatusCode, string(data), resp.Header)
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(data, &result); err != nil {
@@ -414,7 +414,7 @@ func (c *Client) PostStreamContext(ctx context.Context, endpoint string, body ma
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(resp.Body)
 		slog.Error("upstream stream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
+		return nil, NewHTTPError(resp.StatusCode, string(data), resp.Header)
 	}
 	if err := decodeStreamBody(resp); err != nil {
 		resp.Body.Close()
@@ -437,7 +437,7 @@ func (c *Client) PostAnthropicStreamContext(ctx context.Context, endpoint string
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(resp.Body)
 		slog.Error("upstream anthropic stream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
+		return nil, NewHTTPError(resp.StatusCode, string(data), resp.Header)
 	}
 	if err := decodeStreamBody(resp); err != nil {
 		resp.Body.Close()

@@ -105,31 +105,20 @@ var serveCmd = &cobra.Command{
 
 		// Per-request client resolution from database accounts
 		if s != nil {
-			// Shared transport for connection pooling and limits
-			sharedTransport := &http.Transport{
-				MaxIdleConnsPerHost: 10,
-				MaxConnsPerHost:     20,
-				IdleConnTimeout:     90 * time.Second,
-			}
+			transportManager := joycode.NewTransportManager(s.GetIntSetting("max_connections", 20))
+			client.SetTransport(transportManager)
 
-			// Background goroutine to sync max_connections setting
+			// Background goroutine atomically swaps immutable transports when the
+			// connection limit changes.
 			go func() {
 				ticker := time.NewTicker(10 * time.Second)
 				defer ticker.Stop()
 				for {
 					select {
 					case <-ticker.C:
-						maxConns := s.GetIntSetting("max_connections", 20)
-						if maxConns < 1 {
-							maxConns = 1
-						}
-						sharedTransport.MaxConnsPerHost = maxConns
-						idle := maxConns / 2
-						if idle < 2 {
-							idle = 2
-						}
-						sharedTransport.MaxIdleConnsPerHost = idle
+						transportManager.Update(s.GetIntSetting("max_connections", 20))
 					case <-stopCh:
+						transportManager.CloseIdleConnections()
 						return
 					}
 				}
@@ -140,6 +129,7 @@ var serveCmd = &cobra.Command{
 				if systemClient != nil && systemClient.PtKey == "placeholder" {
 					if creds, err := auth.LoadFromSystem(); err == nil {
 						systemClient = joycode.NewClient(creds.PtKey, creds.UserID)
+						systemClient.SetTransport(transportManager)
 						systemClient.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
 					}
 				}
@@ -156,6 +146,7 @@ var serveCmd = &cobra.Command{
 				// upstream gateway rejects with "账号未登录" for JD-cloud logins.
 				newAccountClient := func(ptKey, userID string) *joycode.Client {
 					cl := joycode.NewClient(ptKey, userID)
+					cl.SetTransport(transportManager)
 					if creds, err := auth.LoadFromSystem(); err == nil {
 						cl.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
 					}
@@ -175,9 +166,7 @@ var serveCmd = &cobra.Command{
 					}
 				}
 				if account, _ := s.GetDefaultAccount(); account != nil {
-					cl := newAccountClient(account.PtKey, account.UserID)
-					cl.SetTransport(sharedTransport)
-					return cl
+					return newAccountClient(account.PtKey, account.UserID)
 				}
 				return systemClient
 			}

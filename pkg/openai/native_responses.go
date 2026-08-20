@@ -69,6 +69,7 @@ func (s *Server) handleNativeResponsesNonStream(w http.ResponseWriter, r *http.R
 	response, err := client.PostResponsesContext(r.Context(), body)
 	if err != nil {
 		status := upstreamHTTPStatus(err)
+		copyRetryAfter(w, err)
 		errorType := "api_error"
 		code := "upstream_error"
 		if status == http.StatusBadRequest {
