@@ -490,6 +490,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 				toolCalls[idx].Name = tc.Function.Name
 			}
 			toolCalls[idx].Arguments += tc.Function.Arguments
+			// Temporary diagnostics for the missing file_path investigation
+			if strings.Contains(tc.Function.Arguments, "}{") {
+				reqLog(r).Warn("tool arguments chunk contains json boundary", "index", idx, "name", toolCalls[idx].Name, "chunk", tc.Function.Arguments)
+			}
 		}
 
 		text := choice.Delta.Content
