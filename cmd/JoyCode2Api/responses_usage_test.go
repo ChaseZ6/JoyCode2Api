@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,7 +65,9 @@ func TestRequestLogMiddleware_RecordsResponsesAliasUsage(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"completed"}`))
 	})
-	handler := requestLogMiddleware(next, s)
+	writer := store.NewRequestLogWriter(s, 16)
+	defer writer.Shutdown(context.Background())
+	handler := requestLogMiddleware(next, s, writer)
 	req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(
 		`{"model":"gpt-5.6-sol","stream":true,"input":"hello"}`))
 	rec := httptest.NewRecorder()
@@ -93,7 +96,9 @@ func TestRequestLogMiddleware_RecordsInternalStreamFailure(t *testing.T) {
 		w.Write([]byte("data: {\"type\":\"response.created\"}\n\n"))
 		store.SetRequestError(r, http.StatusBadGateway, "stream_truncated: upstream closed before terminal event")
 	})
-	handler := requestLogMiddleware(next, s)
+	writer := store.NewRequestLogWriter(s, 16)
+	defer writer.Shutdown(context.Background())
+	handler := requestLogMiddleware(next, s, writer)
 	req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(
 		`{"model":"gpt-5.6-sol","stream":true,"input":"hello"}`))
 	rec := httptest.NewRecorder()

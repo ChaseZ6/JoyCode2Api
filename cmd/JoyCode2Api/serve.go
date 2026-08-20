@@ -93,6 +93,11 @@ var serveCmd = &cobra.Command{
 		// instead of a hardcoded list.
 		joycode.DefaultRegistry.SetFetcher(client.ListModels)
 
+		var requestLogWriter *store.RequestLogWriter
+		if s != nil {
+			requestLogWriter = store.NewRequestLogWriter(s, 4096)
+		}
+
 		srv := openai.NewServer(client, s)
 		anth := anthropic.NewHandler(client, s)
 
@@ -213,7 +218,7 @@ var serveCmd = &cobra.Command{
 		var handler http.Handler = mux
 		if s != nil {
 			handler = auth.JWTMiddleware(s, handler)
-			handler = requestLogMiddleware(handler, s)
+			handler = requestLogMiddleware(handler, s, requestLogWriter)
 		}
 		if verbose {
 			handler = loggingMiddleware(handler)
@@ -299,6 +304,11 @@ var serveCmd = &cobra.Command{
 			log.Printf("Server shutdown error: %v", err)
 		}
 		keeper.Stop()
+		if requestLogWriter != nil {
+			if err := requestLogWriter.Shutdown(ctx); err != nil {
+				log.Printf("Request log writer shutdown error: %v", err)
+			}
+		}
 		if s != nil {
 			s.Close()
 		}
@@ -323,7 +333,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
+func requestLogMiddleware(next http.Handler, s *store.Store, writer *store.RequestLogWriter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		r = store.InitTokenUsage(r)
@@ -448,7 +458,11 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 				model = resolvedModel
 			}
 			if s.GetSetting("enable_request_logging") != "false" {
-				go s.LogRequest(apiKey, model, path, isStream, loggedStatus, latency, errMsg, inTk, outTk)
+				writer.Enqueue(store.RequestLogEntry{
+					UserID: apiKey, Model: model, Endpoint: path, Stream: isStream,
+					StatusCode: loggedStatus, LatencyMs: latency, ErrorMessage: errMsg,
+					InputTokens: inTk, OutputTokens: outTk,
+				})
 			}
 		}
 	})
