@@ -13,10 +13,16 @@ func setProcAttrDetached(cmd *exec.Cmd) {
 }
 
 func terminateProcess(proc *os.Process) error {
+	if err := syscall.Kill(-proc.Pid, syscall.SIGTERM); err == nil {
+		return nil
+	}
 	return proc.Signal(syscall.SIGTERM)
 }
 
 func killProcess(proc *os.Process) error {
+	if err := syscall.Kill(-proc.Pid, syscall.SIGKILL); err == nil {
+		return nil
+	}
 	return proc.Signal(syscall.SIGKILL)
 }
 

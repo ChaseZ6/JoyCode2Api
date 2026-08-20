@@ -523,11 +523,19 @@ func (c *Client) RerankContext(ctx context.Context, query string, documents []st
 }
 
 func (c *Client) UserInfo() (map[string]interface{}, error) {
-	return c.Post("/api/saas/user/v1/userInfo", map[string]interface{}{})
+	return c.UserInfoContext(context.Background())
+}
+
+func (c *Client) UserInfoContext(ctx context.Context) (map[string]interface{}, error) {
+	return c.PostContext(ctx, "/api/saas/user/v1/userInfo", map[string]interface{}{})
 }
 
 func (c *Client) Validate() error {
-	resp, err := c.UserInfo()
+	return c.ValidateContext(context.Background())
+}
+
+func (c *Client) ValidateContext(ctx context.Context) error {
+	resp, err := c.UserInfoContext(ctx)
 	if err != nil {
 		return fmt.Errorf("credential validation failed: %w", err)
 	}
@@ -545,7 +553,11 @@ func (c *Client) Validate() error {
 // UserInfoWithRefresh calls the UserInfo API and returns the refreshed ptKey
 // from the response data, if present. Returns (refreshedPtKey, nil) on success.
 func (c *Client) UserInfoWithRefresh() (string, error) {
-	resp, err := c.UserInfo()
+	return c.UserInfoWithRefreshContext(context.Background())
+}
+
+func (c *Client) UserInfoWithRefreshContext(ctx context.Context) (string, error) {
+	resp, err := c.UserInfoContext(ctx)
 	if err != nil {
 		return "", fmt.Errorf("user info request failed: %w", err)
 	}

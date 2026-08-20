@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -75,7 +74,6 @@ var daemonRestartCmd = &cobra.Command{
 		if err := stopDaemon(); err != nil {
 			log.Printf("stop warning: %v", err)
 		}
-		time.Sleep(500 * time.Millisecond)
 		return startDaemon()
 	},
 }
@@ -193,21 +191,27 @@ func stopDaemon() error {
 		return nil
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		_, err := proc.Wait()
-		done <- err
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
+	if !waitProcessExit(proc, 5*time.Second) {
 		killProcess(proc)
+		if !waitProcessExit(proc, 5*time.Second) {
+			return fmt.Errorf("daemon process %d did not exit after force kill", pidData.PID)
+		}
 	}
 
 	removePIDFile()
 	fmt.Printf("Daemon stopped (was PID %d)\n", pidData.PID)
 	return nil
+}
+
+func waitProcessExit(proc *os.Process, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !isProcessAlive(proc) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return !isProcessAlive(proc)
 }
 
 func daemonStatusCmdRun() error {
@@ -282,17 +286,18 @@ func RunSupervisor(port int) {
 
 	log.Printf("[supervisor] starting (PID %d, port %d)", os.Getpid(), port)
 
-	writePIDFile(daemonPID{
+	if err := writePIDFile(daemonPID{
 		PID:       os.Getpid(),
 		Port:      port,
 		StartedAt: time.Now().Format(time.RFC3339),
-	})
+	}); err != nil {
+		log.Fatalf("[supervisor] cannot write PID file: %v", err)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	var mu sync.Mutex
-	delay := baseRestartDelay
+	var delay = baseRestartDelay
 
 	for {
 		binPath, err := os.Executable()
@@ -327,10 +332,11 @@ func RunSupervisor(port int) {
 		log.Printf("[supervisor] spawning child process")
 		if err := cmd.Start(); err != nil {
 			log.Printf("[supervisor] failed to start child: %v", err)
-			mu.Lock()
-			time.Sleep(delay)
+			if !waitSupervisorBackoff(delay, sigCh) {
+				removePIDFile()
+				return
+			}
 			delay = minDuration(delay*2, maxRestartDelay)
-			mu.Unlock()
 			continue
 		}
 
@@ -346,19 +352,37 @@ func RunSupervisor(port int) {
 			} else {
 				log.Printf("[supervisor] child exited cleanly — restarting in %v", delay)
 			}
-			mu.Lock()
-			time.Sleep(delay)
+			if !waitSupervisorBackoff(delay, sigCh) {
+				removePIDFile()
+				return
+			}
 			delay = minDuration(delay*2, maxRestartDelay)
-			mu.Unlock()
 
 		case sig := <-sigCh:
 			log.Printf("[supervisor] received %v — shutting down", sig)
 			terminateProcess(cmd.Process)
-			cmd.Wait()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				killProcess(cmd.Process)
+				<-done
+			}
 			removePIDFile()
 			log.Printf("[supervisor] stopped")
 			return
 		}
+	}
+}
+
+func waitSupervisorBackoff(delay time.Duration, sigCh <-chan os.Signal) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case sig := <-sigCh:
+		log.Printf("[supervisor] received %v during restart backoff — shutting down", sig)
+		return false
 	}
 }
 
@@ -378,11 +402,36 @@ type daemonPID struct {
 }
 
 func writePIDFile(data daemonPID) error {
-	if err := os.MkdirAll(filepath.Dir(daemonPIDFile), 0755); err != nil {
+	dir := filepath.Dir(daemonPIDFile)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(data, "", "  ")
-	return os.WriteFile(daemonPIDFile, b, 0644)
+	payload, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".daemon.pid-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, daemonPIDFile)
 }
 
 func readPIDFile() (daemonPID, error) {

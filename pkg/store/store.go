@@ -915,20 +915,22 @@ func (s *Store) UpdatePtKey(userID, ptKey string) error {
 
 // UpdateCredentialRefreshedAt sets credential_refreshed_at to now for an account
 // that was validated but did not need a pt_key refresh.
-func (s *Store) UpdateCredentialRefreshedAt(userID string) {
-	s.db.Exec(
+func (s *Store) UpdateCredentialRefreshedAt(userID string) error {
+	_, err := s.db.Exec(
 		"UPDATE accounts SET credential_refreshed_at = datetime('now', 'localtime') WHERE user_id = ?",
 		userID,
 	)
+	return err
 }
 
 // SetCredentialValid updates the credential_valid status for an account.
-func (s *Store) SetCredentialValid(userID string, valid bool) {
+func (s *Store) SetCredentialValid(userID string, valid bool) error {
 	v := 0
 	if valid {
 		v = 1
 	}
-	s.db.Exec("UPDATE accounts SET credential_valid = ? WHERE user_id = ?", v, userID)
+	_, err := s.db.Exec("UPDATE accounts SET credential_valid = ? WHERE user_id = ?", v, userID)
+	return err
 }
 
 // ListStaleAccounts returns accounts that need credential checking.
