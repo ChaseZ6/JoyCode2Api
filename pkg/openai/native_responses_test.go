@@ -64,16 +64,17 @@ func TestNativeResponses_NonStream(t *testing.T) {
 	}
 }
 
-func TestNativeResponses_RequiresResponsesModel(t *testing.T) {
+func TestNativeResponses_RejectsAnthropicModel(t *testing.T) {
 	seedNativeResponsesRegistry(t, []joycode.ModelInfo{
 		gptSolModel(),
-		{Label: "JoyAI-Code-1.5", ChatAPIModel: "JoyAI-Code-1.5"},
+		{Label: "Claude Sonnet", ChatAPIModel: "claude-sonnet",
+			ExtJSON: map[string]interface{}{"adapterType": joycode.AdapterAnthropic}},
 	})
 	server := NewServer(&joycode.Client{}, nil)
 	mux := http.NewServeMux()
 	server.RegisterRoutes(mux)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
-		`{"model":"JoyAI-Code-1.5","input":"hello"}`))
+		`{"model":"Claude Sonnet","input":"hello"}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unsupported_model") {
@@ -296,5 +297,201 @@ func TestNativeResponsesNonStream_FailedMarksOutcomeButPreservesResponse(t *test
 	}
 	if inTk, outTk := store.GetTokenUsage(req); inTk != 7 || outTk != 0 {
 		t.Errorf("usage = %d/%d", inTk, outTk)
+	}
+}
+
+func kimiModel() joycode.ModelInfo {
+	return joycode.ModelInfo{Label: "Kimi-K3", ChatAPIModel: "Kimi-K3"}
+}
+
+// TestNativeResponses_ChatModelFallbackNonStream verifies that a Responses
+// request aimed at a chat-completions model is bridged to the upstream chat
+// endpoint and wrapped back into a Responses object.
+func TestNativeResponses_ChatModelFallbackNonStream(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{kimiModel()})
+	var upstreamBody map[string]interface{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			t.Errorf("unexpected upstream path %s", r.URL.Path)
+		}
+		decoder := json.NewDecoder(r.Body)
+		decoder.UseNumber()
+		if err := decoder.Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi there"}}],"usage":{"prompt_tokens":12,"completion_tokens":4}}`))
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"Kimi-K3","input":"hello","instructions":"be terse","max_output_tokens":8192}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["object"] != "response" || out["status"] != "completed" {
+		t.Fatalf("output = %s", rec.Body.String())
+	}
+	items, _ := out["output"].([]interface{})
+	if len(items) != 1 {
+		t.Fatalf("output items = %s", rec.Body.String())
+	}
+	item, _ := items[0].(map[string]interface{})
+	if item["type"] != "message" || item["role"] != "assistant" {
+		t.Fatalf("item = %v", item)
+	}
+	usage, _ := out["usage"].(map[string]interface{})
+	if intFromJSON(usage["input_tokens"]) != 12 || intFromJSON(usage["output_tokens"]) != 4 {
+		t.Fatalf("usage = %v", usage)
+	}
+
+	// Verify the translated chat request.
+	if upstreamBody["model"] != "Kimi-K3" {
+		t.Errorf("model = %v", upstreamBody["model"])
+	}
+	if intFromJSON(upstreamBody["max_tokens"]) != 8192 {
+		t.Errorf("max_tokens = %v", upstreamBody["max_tokens"])
+	}
+	messages, _ := upstreamBody["messages"].([]interface{})
+	if len(messages) != 2 {
+		t.Fatalf("messages = %v", upstreamBody["messages"])
+	}
+	first, _ := messages[0].(map[string]interface{})
+	if first["role"] != "system" || first["content"] != "be terse" {
+		t.Errorf("first message = %v", first)
+	}
+	second, _ := messages[1].(map[string]interface{})
+	if second["role"] != "user" || second["content"] != "hello" {
+		t.Errorf("second message = %v", second)
+	}
+}
+
+// TestNativeResponses_ChatModelFallbackStream verifies chat-completions
+// streaming chunks are re-emitted as Responses events.
+func TestNativeResponses_ChatModelFallbackStream(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{kimiModel()})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		io.WriteString(w, `data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"he"}}]}`+"\n\n")
+		flusher.Flush()
+		io.WriteString(w, `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"llo"}}]}`+"\n\n")
+		flusher.Flush()
+		io.WriteString(w, `data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2}}`+"\n\n")
+		flusher.Flush()
+		io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"Kimi-K3","input":"hello","stream":true}`))
+	req = store.InitTokenUsage(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	for _, want := range []string{
+		`"type":"response.created"`,
+		`"type":"response.output_item.added"`,
+		`"type":"response.output_text.delta"`,
+		`"delta":"he"`, `"delta":"llo"`,
+		`"type":"response.completed"`,
+		`"input_tokens":9`, `"output_tokens":2`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in stream:\n%s", want, out)
+		}
+	}
+	if inTk, outTk := store.GetTokenUsage(req); inTk != 9 || outTk != 2 {
+		t.Errorf("usage = %d/%d", inTk, outTk)
+	}
+}
+
+// TestTranslateResponsesReqToChat covers the request-direction translator in
+// isolation.
+func TestTranslateResponsesReqToChat(t *testing.T) {
+	body := map[string]interface{}{
+		"model":             "Kimi-K3",
+		"instructions":      "be nice",
+		"max_output_tokens": 128,
+		"stream":            true,
+		"input": []interface{}{
+			map[string]interface{}{"type": "message", "role": "user", "content": "hi"},
+			map[string]interface{}{
+				"type": "function_call", "call_id": "call_1", "name": "get_weather",
+				"arguments": `{"city":"BJ"}`,
+			},
+			map[string]interface{}{
+				"type": "function_call_output", "call_id": "call_1",
+				"output": "sunny",
+			},
+		},
+		"tools": []interface{}{
+			map[string]interface{}{
+				"type": "function", "name": "get_weather",
+				"description": "Get weather", "parameters": map[string]interface{}{"type": "object"},
+			},
+			map[string]interface{}{
+				"type": "namespace", "name": "shell", "namespace": map[string]interface{}{"name": "shell"},
+			},
+		},
+		"tool_choice": "auto",
+	}
+	chat, err := TranslateResponsesReqToChat(body, "Kimi-K3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat["model"] != "Kimi-K3" || chat["stream"] != true {
+		t.Errorf("model/stream = %v %v", chat["model"], chat["stream"])
+	}
+	if intFromJSON(chat["max_tokens"]) != 128 {
+		t.Errorf("max_tokens = %v", chat["max_tokens"])
+	}
+	streamOpts, _ := chat["stream_options"].(map[string]interface{})
+	if streamOpts["include_usage"] != true {
+		t.Errorf("stream_options = %v", streamOpts)
+	}
+	messages, _ := chat["messages"].([]map[string]interface{})
+	if len(messages) != 4 {
+		t.Fatalf("messages = %v", chat["messages"])
+	}
+	system := messages[0]
+	if system["role"] != "system" {
+		t.Errorf("messages[0] = %v", system)
+	}
+	assistant := messages[2]
+	if assistant["role"] != "assistant" {
+		t.Fatalf("messages[2] = %v", assistant)
+	}
+	toolCalls, _ := assistant["tool_calls"].([]map[string]interface{})
+	if len(toolCalls) != 1 || toolCalls[0]["id"] != "call_1" {
+		t.Errorf("tool_calls = %v", toolCalls)
+	}
+	toolMsg := messages[3]
+	if toolMsg["role"] != "tool" || toolMsg["tool_call_id"] != "call_1" || toolMsg["content"] != "sunny" {
+		t.Errorf("tool message = %v", toolMsg)
+	}
+	tools, _ := chat["tools"].([]map[string]interface{})
+	if len(tools) != 1 || tools[0]["type"] != "function" {
+		t.Fatalf("tools = %v", tools)
+	}
+	fn, _ := tools[0]["function"].(map[string]interface{})
+	if fn["name"] != "get_weather" {
+		t.Errorf("function = %v", fn)
 	}
 }

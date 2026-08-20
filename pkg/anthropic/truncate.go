@@ -14,6 +14,7 @@ const (
 	bytesPerToken = 3.5
 	// Maximum truncation rounds before giving up
 	maxTruncationRounds = 5
+	contextSafetyTokens = 8192
 )
 
 // EstimateInputTokens provides a deterministic local estimate for Anthropic
@@ -56,8 +57,22 @@ func estimateTokens(req *MessageRequest) int {
 // Returns -1 if truncation failed to bring estimated tokens below threshold.
 func PreemptiveTruncate(req *MessageRequest) int {
 	window := float64(contextWindowSize)
-	ratio := float64(preemptiveThresholdRatio)
-	threshold := int(window * ratio)
+	ratioThreshold := int(window * float64(preemptiveThresholdRatio))
+	// The upstream limit covers input and output together. The old check only
+	// budgeted input, so a 64K output request could pass preflight with an input
+	// estimate that already consumed nearly the whole context window.
+	outputBudget := req.MaxTokens
+	if outputBudget < 0 {
+		outputBudget = 0
+	}
+	combinedThreshold := contextWindowSize - outputBudget - contextSafetyTokens
+	if combinedThreshold < 1 {
+		combinedThreshold = 1
+	}
+	threshold := ratioThreshold
+	if combinedThreshold < threshold {
+		threshold = combinedThreshold
+	}
 
 	rounds := 0
 	for rounds < maxTruncationRounds {

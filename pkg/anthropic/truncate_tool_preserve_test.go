@@ -2,8 +2,31 @@ package anthropic
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
+
+func TestPreemptiveTruncateReservesOutputBudget(t *testing.T) {
+	message := strings.Repeat("context ", 550000)
+	req := &MessageRequest{
+		MaxTokens: 64000,
+		Messages: []MessageParam{
+			{Role: "user", Content: json.RawMessage(`"start"`)},
+			{Role: "assistant", Content: json.RawMessage(`"` + message + `"`)},
+			{Role: "user", Content: json.RawMessage(`"middle 1"`)},
+			{Role: "assistant", Content: json.RawMessage(`"middle 2"`)},
+			{Role: "user", Content: json.RawMessage(`"middle 3"`)},
+			{Role: "user", Content: json.RawMessage(`"latest"`)},
+		},
+	}
+	before := estimateTokens(req)
+	if before <= contextWindowSize-64000-contextSafetyTokens {
+		t.Fatalf("fixture must exceed output-aware threshold: %d", before)
+	}
+	if rounds := PreemptiveTruncate(req); rounds <= 0 {
+		t.Fatalf("expected output-aware truncation, got %d", rounds)
+	}
+}
 
 func TestFindToolPairBoundary_NoToolUse(t *testing.T) {
 	msgs := []MessageParam{

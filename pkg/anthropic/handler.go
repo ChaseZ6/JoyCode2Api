@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -378,9 +379,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	defer resp.Body.Close()
 
 	type toolCallAccum struct {
-		ID        string
-		Name      string
-		Arguments string
+		ID            string
+		Name          string
+		Arguments     string
+		ArgumentsSent bool
 	}
 	toolCalls := make(map[int]*toolCallAccum)
 	currentBlockIndex := 0
@@ -454,6 +456,15 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 				flusher.Flush()
 				currentBlockIndex++
 			}
+			if tc.Function.Arguments != "" {
+				FormatSSE(w, "content_block_delta", sseContentBlockDelta{
+					Type:  "content_block_delta",
+					Index: toolBlockToIdx[idx],
+					Delta: deltaText{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
+				})
+				flusher.Flush()
+				toolCalls[idx].ArgumentsSent = true
+			}
 		}
 
 		text := choice.Delta.Content
@@ -499,19 +510,22 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 				currentBlockIndex++
 				textBlockStarted = false
 			}
-			for i := 0; i < len(toolCalls); i++ {
-				if toolBlockStarted[i] {
-					args := toolCalls[i].Arguments
-					if args == "" || !json.Valid([]byte(args)) {
-						args = "{}"
+			toolIndexes := make([]int, 0, len(toolCalls))
+			for idx := range toolCalls {
+				toolIndexes = append(toolIndexes, idx)
+			}
+			sort.Ints(toolIndexes)
+			for _, idx := range toolIndexes {
+				if toolBlockStarted[idx] {
+					if !toolCalls[idx].ArgumentsSent {
+						FormatSSE(w, "content_block_delta", sseContentBlockDelta{
+							Type:  "content_block_delta",
+							Index: toolBlockToIdx[idx],
+							Delta: deltaText{Type: "input_json_delta", PartialJSON: "{}"},
+						})
 					}
-					FormatSSE(w, "content_block_delta", sseContentBlockDelta{
-						Type:  "content_block_delta",
-						Index: toolBlockToIdx[i],
-						Delta: deltaText{Type: "input_json_delta", PartialJSON: args},
-					})
 					FormatSSE(w, "content_block_stop", sseContentBlockStop{
-						Type: "content_block_stop", Index: toolBlockToIdx[i],
+						Type: "content_block_stop", Index: toolBlockToIdx[idx],
 					})
 				}
 			}

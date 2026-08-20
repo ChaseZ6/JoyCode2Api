@@ -44,13 +44,6 @@ func (s *Server) handleNativeResponses(w http.ResponseWriter, r *http.Request) {
 		configuredMaxTokens = s.store.GetIntSetting("default_max_tokens", 0)
 	}
 	model := ResolveModelInfo(requestedModel, store.GetAccountDefaultModel(r), systemDefault)
-	if model.Adapter() != joycode.AdapterOpenAIResponse {
-		writeOpenAIError(w, http.StatusBadRequest,
-			fmt.Sprintf("model %s is not served by the Responses API", model.DisplayName()),
-			"invalid_request_error", "unsupported_model", "model")
-		return
-	}
-	body["model"] = model.APIName()
 	store.SetModel(r, model.DisplayName())
 
 	// Codex sends max_output_tokens directly. Apply the same model-aware ceiling
@@ -58,11 +51,38 @@ func (s *Server) handleNativeResponses(w http.ResponseWriter, r *http.Request) {
 	requestedMax := intFromJSON(body["max_output_tokens"])
 	body["max_output_tokens"] = model.EffectiveMaxTokens(requestedMax, configuredMaxTokens)
 	stream, _ := body["stream"].(bool)
-	if stream {
-		s.handleNativeResponsesStream(w, r, s.getClient(r), body)
+	client := s.getClient(r)
+
+	if model.Adapter() != joycode.AdapterOpenAIResponse {
+		if model.Adapter() == joycode.AdapterAnthropic {
+			writeOpenAIError(w, http.StatusBadRequest,
+				fmt.Sprintf("model %s is served by the Anthropic Messages API and cannot be bridged to Responses", model.DisplayName()),
+				"invalid_request_error", "unsupported_model", "model")
+			return
+		}
+		// chat-completions models: translate the Responses request into a
+		// chat/completions call and wrap the result back into Responses shape,
+		// so Codex / CC Switch can use models like Kimi-K3.
+		chatBody, err := TranslateResponsesReqToChat(body, model.APIName())
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "Invalid Responses request: "+err.Error(),
+				"invalid_request_error", "invalid_request", "")
+			return
+		}
+		if stream {
+			s.handleResponsesViaChatStream(w, r, client, chatBody, model.DisplayName())
+			return
+		}
+		s.handleResponsesViaChatNonStream(w, r, client, chatBody, model.DisplayName())
 		return
 	}
-	s.handleNativeResponsesNonStream(w, r, s.getClient(r), body)
+
+	body["model"] = model.APIName()
+	if stream {
+		s.handleNativeResponsesStream(w, r, client, body)
+		return
+	}
+	s.handleNativeResponsesNonStream(w, r, client, body)
 }
 
 func (s *Server) handleNativeResponsesNonStream(w http.ResponseWriter, r *http.Request, client *joycode.Client, body map[string]interface{}) {
