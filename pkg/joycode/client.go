@@ -3,6 +3,7 @@ package joycode
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -271,13 +272,13 @@ func (c *Client) prepareAnthropicBody(extra map[string]interface{}) map[string]i
 	return body
 }
 
-func (c *Client) doPost(endpoint string, body map[string]interface{}) (*http.Response, error) {
+func (c *Client) doPost(ctx context.Context, endpoint string, body map[string]interface{}) (*http.Response, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		slog.Error("marshal request body", "endpoint", endpoint, "error", err)
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.requestURL(endpoint), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.requestURL(endpoint), bytes.NewReader(data))
 	if err != nil {
 		slog.Error("create request", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -290,13 +291,13 @@ func (c *Client) doPost(endpoint string, body map[string]interface{}) (*http.Res
 // upstream returns raw (uncompressed) SSE. gzip.Reader buffers an entire
 // gzip block before yielding any bytes, which breaks chunk-by-chunk
 // streaming — the client sees all data arrive at once after a long delay.
-func (c *Client) doPostStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
+func (c *Client) doPostStream(ctx context.Context, endpoint string, body map[string]interface{}) (*http.Response, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		slog.Error("marshal stream request body", "endpoint", endpoint, "error", err)
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.requestURL(endpoint), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.requestURL(endpoint), bytes.NewReader(data))
 	if err != nil {
 		slog.Error("create stream request", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -307,13 +308,13 @@ func (c *Client) doPostStream(endpoint string, body map[string]interface{}) (*ht
 	return c.httpClient.Do(req)
 }
 
-func (c *Client) doAnthropicPost(endpoint string, body map[string]interface{}) (*http.Response, error) {
+func (c *Client) doAnthropicPost(ctx context.Context, endpoint string, body map[string]interface{}) (*http.Response, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		slog.Error("marshal anthropic request body", "endpoint", endpoint, "error", err)
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.requestURL(endpoint), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.requestURL(endpoint), bytes.NewReader(data))
 	if err != nil {
 		slog.Error("create anthropic request", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -324,13 +325,13 @@ func (c *Client) doAnthropicPost(endpoint string, body map[string]interface{}) (
 
 // doAnthropicPostStream is like doAnthropicPost but disables gzip for the
 // same reason as doPostStream — see its comment for details.
-func (c *Client) doAnthropicPostStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
+func (c *Client) doAnthropicPostStream(ctx context.Context, endpoint string, body map[string]interface{}) (*http.Response, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		slog.Error("marshal anthropic stream request body", "endpoint", endpoint, "error", err)
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.requestURL(endpoint), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.requestURL(endpoint), bytes.NewReader(data))
 	if err != nil {
 		slog.Error("create anthropic stream request", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -369,7 +370,11 @@ func decodeStreamBody(resp *http.Response) error {
 }
 
 func (c *Client) Post(endpoint string, body map[string]interface{}) (map[string]interface{}, error) {
-	resp, err := c.doPost(endpoint, c.prepareBody(body))
+	return c.PostContext(context.Background(), endpoint, body)
+}
+
+func (c *Client) PostContext(ctx context.Context, endpoint string, body map[string]interface{}) (map[string]interface{}, error) {
+	resp, err := c.doPost(ctx, endpoint, c.prepareBody(body))
 	if err != nil {
 		slog.Error("upstream request failed", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -396,7 +401,11 @@ func (c *Client) Post(endpoint string, body map[string]interface{}) (map[string]
 }
 
 func (c *Client) PostStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	resp, err := c.doPostStream(endpoint, c.prepareBody(body))
+	return c.PostStreamContext(context.Background(), endpoint, body)
+}
+
+func (c *Client) PostStreamContext(ctx context.Context, endpoint string, body map[string]interface{}) (*http.Response, error) {
+	resp, err := c.doPostStream(ctx, endpoint, c.prepareBody(body))
 	if err != nil {
 		slog.Error("upstream stream connect", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -415,7 +424,11 @@ func (c *Client) PostStream(endpoint string, body map[string]interface{}) (*http
 }
 
 func (c *Client) PostAnthropicStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	resp, err := c.doAnthropicPostStream(endpoint, c.prepareAnthropicBody(body))
+	return c.PostAnthropicStreamContext(context.Background(), endpoint, body)
+}
+
+func (c *Client) PostAnthropicStreamContext(ctx context.Context, endpoint string, body map[string]interface{}) (*http.Response, error) {
+	resp, err := c.doAnthropicPostStream(ctx, endpoint, c.prepareAnthropicBody(body))
 	if err != nil {
 		slog.Error("upstream anthropic stream connect", "endpoint", endpoint, "error", err)
 		return nil, err
@@ -436,17 +449,29 @@ func (c *Client) PostAnthropicStream(endpoint string, body map[string]interface{
 // PostResponses calls the OpenAI Responses API (non-streaming). The response is
 // the Responses object, not a chat completion.
 func (c *Client) PostResponses(body map[string]interface{}) (map[string]interface{}, error) {
-	return c.Post(ResponsesEndpoint, body)
+	return c.PostResponsesContext(context.Background(), body)
+}
+
+func (c *Client) PostResponsesContext(ctx context.Context, body map[string]interface{}) (map[string]interface{}, error) {
+	return c.PostContext(ctx, ResponsesEndpoint, body)
 }
 
 // PostResponsesStream calls the OpenAI Responses API in streaming mode and
 // returns the raw SSE response for the caller to translate.
 func (c *Client) PostResponsesStream(body map[string]interface{}) (*http.Response, error) {
-	return c.PostStream(ResponsesEndpoint, body)
+	return c.PostResponsesStreamContext(context.Background(), body)
+}
+
+func (c *Client) PostResponsesStreamContext(ctx context.Context, body map[string]interface{}) (*http.Response, error) {
+	return c.PostStreamContext(ctx, ResponsesEndpoint, body)
 }
 
 func (c *Client) ListModels() ([]ModelInfo, error) {
-	resp, err := c.Post("/api/saas/models/v1/modelList", map[string]interface{}{})
+	return c.ListModelsContext(context.Background())
+}
+
+func (c *Client) ListModelsContext(ctx context.Context) ([]ModelInfo, error) {
+	resp, err := c.PostContext(ctx, "/api/saas/models/v1/modelList", map[string]interface{}{})
 	if err != nil {
 		return nil, err
 	}
@@ -470,11 +495,15 @@ func (c *Client) ListModels() ([]ModelInfo, error) {
 }
 
 func (c *Client) WebSearch(query string) ([]interface{}, error) {
+	return c.WebSearchContext(context.Background(), query)
+}
+
+func (c *Client) WebSearchContext(ctx context.Context, query string) ([]interface{}, error) {
 	body := map[string]interface{}{
 		"messages": []map[string]string{{"role": "user", "content": query}},
 		"stream":   false, "model": "search_pro_jina", "language": "UNKNOWN",
 	}
-	resp, err := c.Post("/api/saas/openai/v1/web-search", body)
+	resp, err := c.PostContext(ctx, "/api/saas/openai/v1/web-search", body)
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +512,11 @@ func (c *Client) WebSearch(query string) ([]interface{}, error) {
 }
 
 func (c *Client) Rerank(query string, documents []string, topN int) (map[string]interface{}, error) {
-	return c.Post("/api/saas/openai/v1/rerank", map[string]interface{}{
+	return c.RerankContext(context.Background(), query, documents, topN)
+}
+
+func (c *Client) RerankContext(ctx context.Context, query string, documents []string, topN int) (map[string]interface{}, error) {
+	return c.PostContext(ctx, "/api/saas/openai/v1/rerank", map[string]interface{}{
 		"model": "Qwen3-Reranker-8B", "query": query,
 		"documents": documents, "top_n": topN,
 	})

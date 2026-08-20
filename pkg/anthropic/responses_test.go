@@ -143,7 +143,7 @@ func TestConvertToolChoiceToResponses(t *testing.T) {
 		`{"type":"tool","name":"get_time"}`: map[string]interface{}{"type": "function", "name": "get_time"},
 	}
 	for raw, want := range cases {
-		got := convertToolChoiceToResponses(json.RawMessage(raw))
+		got, _ := convertToolChoiceToResponses(json.RawMessage(raw))
 		gotJSON, _ := json.Marshal(got)
 		wantJSON, _ := json.Marshal(want)
 		if string(gotJSON) != string(wantJSON) {
@@ -238,7 +238,10 @@ func TestTranslateResponsesToAnthropic_MaxTokens(t *testing.T) {
 // state machine and returns the Anthropic SSE bytes it emitted.
 func runResponsesStream(events []string) string {
 	rec := httptest.NewRecorder()
-	st := &responsesStreamState{w: rec, flusher: rec, msgID: "msg_test", displayModel: "GPT-5.6 Sol"}
+	st := &responsesStreamState{
+		w: rec, flusher: rec, msgID: "msg_test", displayModel: "GPT-5.6 Sol",
+		toolsByItem: make(map[string]*anthropicToolStream), toolsByCall: make(map[string]*anthropicToolStream),
+	}
 	st.emitMessageStart(&MessageRequest{})
 	for _, raw := range events {
 		var ev responsesStreamEvent
@@ -383,5 +386,73 @@ func TestResponsesHandlerStream_FailedEventSurfacesError(t *testing.T) {
 	}
 	if outcome.StatusCode != http.StatusBadGateway || !strings.Contains(outcome.Error, "upstream_error") {
 		t.Errorf("outcome = %+v", outcome)
+	}
+}
+
+func TestTranslateAnthropicToResponses_ParallelToolChoice(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{`{"type":"auto","disable_parallel_tool_use":true}`, false},
+		{`{"type":"any","disable_parallel_tool_use":false}`, true},
+	} {
+		req := &MessageRequest{
+			Messages:   []MessageParam{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+			Tools:      []Tool{{Name: "f", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+			ToolChoice: json.RawMessage(tc.raw),
+		}
+		body := TranslateAnthropicToResponses(req, solModel())
+		if got, ok := body["parallel_tool_calls"].(bool); !ok || got != tc.want {
+			t.Errorf("tool choice %s: parallel_tool_calls=%v", tc.raw, body["parallel_tool_calls"])
+		}
+	}
+	req := &MessageRequest{
+		Messages: []MessageParam{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:    []Tool{{Name: "f"}}, ToolChoice: json.RawMessage(`{"type":"auto"}`),
+	}
+	if _, exists := TranslateAnthropicToResponses(req, solModel())["parallel_tool_calls"]; exists {
+		t.Error("parallel_tool_calls must be omitted when the client did not specify it")
+	}
+}
+
+func TestResponsesStream_InterleavedParallelTools(t *testing.T) {
+	out := runResponsesStream([]string{
+		`{"type":"response.output_item.added","item":{"id":"item_a","type":"function_call","name":"alpha","call_id":"call_a"}}`,
+		`{"type":"response.output_item.added","item":{"id":"item_b","type":"function_call","name":"beta","call_id":"call_b"}}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"item_a","delta":"{\"a\":"}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"item_b","delta":"{\"b\":2}"}`,
+		`{"type":"response.function_call_arguments.delta","call_id":"call_a","delta":"1}"}`,
+		`{"type":"response.output_item.done","item":{"id":"item_b","type":"function_call","call_id":"call_b"}}`,
+		`{"type":"response.output_item.done","item":{"id":"item_a","type":"function_call","call_id":"call_a"}}`,
+		`{"type":"response.completed","response":{}}`,
+	})
+	if !strings.Contains(out, `"index":0`) || !strings.Contains(out, `"index":1`) {
+		t.Fatalf("missing distinct tool indices:\n%s", out)
+	}
+	if !strings.Contains(out, `"id":"call_a"`) || !strings.Contains(out, `"id":"call_b"`) {
+		t.Fatalf("missing tool identities:\n%s", out)
+	}
+	if strings.Count(out, `"type":"content_block_stop"`) != 2 {
+		t.Errorf("each tool must stop exactly once:\n%s", out)
+	}
+	// A's two deltas must stay on index 0; B's delta stays on index 1.
+	if !strings.Contains(out, `"index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}`) ||
+		!strings.Contains(out, `"index":0,"delta":{"type":"input_json_delta","partial_json":"1}"}`) ||
+		!strings.Contains(out, `"index":1,"delta":{"type":"input_json_delta","partial_json":"{\"b\":2}"}`) {
+		t.Errorf("tool argument deltas were routed incorrectly:\n%s", out)
+	}
+}
+
+func TestTranslateResponsesToAnthropic_RejectsFailedAndUnknownIncomplete(t *testing.T) {
+	cases := []map[string]interface{}{
+		{"status": "failed", "error": nil, "output": []interface{}{}},
+		{"status": "failed", "error": map[string]interface{}{"message": "model unavailable"}},
+		{"status": "incomplete", "incomplete_details": map[string]interface{}{"reason": "content_filter"}, "output": []interface{}{map[string]interface{}{"type": "message", "content": []interface{}{map[string]interface{}{"type": "output_text", "text": "partial"}}}}},
+	}
+	for _, raw := range cases {
+		if _, err := TranslateResponsesToAnthropic(raw, "GPT-5.6 Sol"); err == nil {
+			t.Errorf("expected error for %#v", raw)
+		}
 	}
 }

@@ -74,7 +74,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNonStreamChat(w http.ResponseWriter, r *http.Request, client *joycode.Client, jcBody map[string]interface{}, model string) {
-	resp, err := client.Post("/api/saas/openai/v1/chat/completions", jcBody)
+	resp, err := client.PostContext(r.Context(), "/api/saas/openai/v1/chat/completions", jcBody)
 	if err != nil {
 		slog.Error("chat non-stream upstream error", "model", model, "error", err)
 		status := upstreamHTTPStatus(err)
@@ -106,7 +106,7 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 	// model handshakes, connectUpstreamStream starts SSE heartbeats after 5s.
 	streamStart := time.Now()
 	resp, committed := connectUpstreamStream(w, flusher, r, func() (*http.Response, error) {
-		return client.PostStream("/api/saas/openai/v1/chat/completions", jcBody)
+		return client.PostStreamContext(r.Context(), "/api/saas/openai/v1/chat/completions", jcBody)
 	})
 	if resp == nil {
 		return
@@ -118,11 +118,10 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 	}
 	slog.Info("stream: connected to upstream", "model", model, "ttfb_ms", time.Since(streamStart).Milliseconds())
 
-	reads := readChatSSE(resp.Body)
+	reads := readChatSSE(r.Context(), resp.Body)
 	heartbeat := time.NewTicker(5 * time.Second)
 	defer heartbeat.Stop()
 	var inTk, outTk int
-	sawDone := false
 	sawFinish := false
 	for {
 		select {
@@ -132,12 +131,6 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 			writeSSEHeartbeat(w, flusher)
 		case item, open := <-reads:
 			if !open {
-				if sawDone {
-					if inTk > 0 || outTk > 0 {
-						store.SetTokenUsage(r, inTk, outTk)
-					}
-					return
-				}
 				if sawFinish {
 					writeSSEDone(w, flusher)
 					if inTk > 0 || outTk > 0 {
@@ -153,9 +146,11 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 				return
 			}
 			if item.Done {
-				sawDone = true
+				if inTk > 0 || outTk > 0 {
+					store.SetTokenUsage(r, inTk, outTk)
+				}
 				writeSSEDone(w, flusher)
-				continue
+				return
 			}
 			if item.BusinessErr != nil {
 				writeSSEError(w, flusher, item.BusinessErr.Error(), "api_error", "upstream_error")

@@ -3,6 +3,7 @@ package joycode
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -44,7 +46,7 @@ func (rt redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if req.URL.RawQuery != "" {
 		newURL += "?" + req.URL.RawQuery
 	}
-	newReq, err := http.NewRequest(req.Method, newURL, req.Body)
+	newReq, err := http.NewRequestWithContext(req.Context(), req.Method, newURL, req.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -952,5 +954,61 @@ func TestRequestURL_UnmappedEndpointStaysDirect(t *testing.T) {
 	want := BaseURL + "/api/saas/openai/v1/rerank"
 	if got != want {
 		t.Errorf("unmapped url = %q, want %q", got, want)
+	}
+}
+
+type clientRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f clientRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestClient_PostContextCancelsUpstream(t *testing.T) {
+	started := make(chan struct{})
+	c := NewClient("k", "u")
+	c.SetHTTPClient(&http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.PostContext(ctx, "/api/test", nil)
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PostContext did not stop after cancellation")
+	}
+}
+
+func TestClient_PostStreamContextCancelsUpstream(t *testing.T) {
+	started := make(chan struct{})
+	c := NewClient("k", "u")
+	c.SetHTTPClient(&http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.PostStreamContext(ctx, "/api/test", nil)
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PostStreamContext did not stop after cancellation")
 	}
 }

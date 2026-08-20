@@ -1,12 +1,12 @@
 package anthropic
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
@@ -41,8 +41,11 @@ func TranslateAnthropicToResponses(req *MessageRequest, model joycode.ModelInfo)
 	}
 	if tools := convertToolsToResponses(req.Tools); len(tools) > 0 {
 		body["tools"] = tools
-		if tc := convertToolChoiceToResponses(req.ToolChoice); tc != nil {
+		if tc, parallel := convertToolChoiceToResponses(req.ToolChoice); tc != nil {
 			body["tool_choice"] = tc
+			if parallel != nil {
+				body["parallel_tool_calls"] = *parallel
+			}
 		}
 	}
 	return body
@@ -189,30 +192,36 @@ func convertToolsToResponses(tools []Tool) []map[string]interface{} {
 }
 
 // convertToolChoiceToResponses maps Anthropic tool_choice to the Responses form.
-func convertToolChoiceToResponses(raw json.RawMessage) interface{} {
+func convertToolChoiceToResponses(raw json.RawMessage) (interface{}, *bool) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	var tc struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type                   string `json:"type"`
+		Name                   string `json:"name"`
+		DisableParallelToolUse *bool  `json:"disable_parallel_tool_use"`
 	}
 	if err := json.Unmarshal(raw, &tc); err != nil {
-		return nil
+		return nil, nil
+	}
+	var parallel *bool
+	if tc.DisableParallelToolUse != nil {
+		value := !*tc.DisableParallelToolUse
+		parallel = &value
 	}
 	switch tc.Type {
 	case "any":
-		return "required"
+		return "required", parallel
 	case "auto":
-		return "auto"
+		return "auto", parallel
 	case "none":
-		return "none"
+		return "none", parallel
 	case "tool":
 		if tc.Name != "" {
-			return map[string]interface{}{"type": "function", "name": tc.Name}
+			return map[string]interface{}{"type": "function", "name": tc.Name}, parallel
 		}
 	}
-	return nil
+	return nil, parallel
 }
 
 // --- Non-streaming ---
@@ -252,6 +261,21 @@ func TranslateResponsesToAnthropic(raw map[string]interface{}, displayModel stri
 	var ro responsesObject
 	if err := json.Unmarshal(b, &ro); err != nil {
 		return nil, err
+	}
+	if len(ro.Error) > 0 && string(ro.Error) != "null" {
+		return nil, fmt.Errorf("upstream response failed: %s", responsesErrorMessage(ro.Error))
+	}
+	if ro.Status == "failed" {
+		return nil, fmt.Errorf("upstream response failed without error details")
+	}
+	if ro.Status == "incomplete" {
+		reason := ""
+		if ro.IncompleteDetails != nil {
+			reason = ro.IncompleteDetails.Reason
+		}
+		if reason != "max_output_tokens" {
+			return nil, fmt.Errorf("upstream response incomplete: %s", reason)
+		}
 	}
 
 	content := make([]ContentBlock, 0, len(ro.Output))
@@ -312,7 +336,7 @@ func (h *Handler) handleResponsesNonStream(w http.ResponseWriter, r *http.Reques
 	body := TranslateAnthropicToResponses(req, model)
 	logRequestDetails(r, "translated responses request (non-stream)", body)
 
-	raw, err := client.PostResponses(body)
+	raw, err := client.PostResponsesContext(r.Context(), body)
 	if err != nil {
 		reqLog(r).Error("responses non-stream upstream error", "model", model.APIName(), "error", err)
 		writeAnthropicError(w, 500, "上游 Responses 接口调用失败: "+err.Error())
@@ -328,12 +352,29 @@ func (h *Handler) handleResponsesNonStream(w http.ResponseWriter, r *http.Reques
 
 	resp, err := TranslateResponsesToAnthropic(raw, model.DisplayName())
 	if err != nil {
+		if usage, ok := raw["usage"].(map[string]interface{}); ok {
+			store.SetTokenUsage(r, intValue(usage["input_tokens"]), intValue(usage["output_tokens"]))
+		}
+		store.SetRequestError(r, http.StatusBadGateway, "upstream Responses status error: "+err.Error())
 		reqLog(r).Error("translate responses object", "error", err)
 		writeAnthropicError(w, 502, "解析上游 Responses 响应失败: "+err.Error())
 		return
 	}
 	store.SetTokenUsage(r, resp.Usage.InputTokens, resp.Usage.OutputTokens)
 	writeAnthropicJSON(w, 200, resp)
+}
+
+func intValue(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		value, _ := n.Int64()
+		return int(value)
+	}
+	return 0
 }
 
 // responsesErrorMessage extracts a human-readable message from an upstream error
@@ -362,9 +403,11 @@ type responsesStreamEvent struct {
 	Type      string      `json:"type"`
 	Delta     string      `json:"delta"`
 	ItemID    string      `json:"item_id"`
+	CallID    string      `json:"call_id"`
 	OutputIdx int         `json:"output_index"`
 	Error     interface{} `json:"error"`
 	Item      struct {
+		ID     string `json:"id"`
 		Type   string `json:"type"`
 		Name   string `json:"name"`
 		CallID string `json:"call_id"`
@@ -396,7 +439,7 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(200)
 
-	resp, err := client.PostResponsesStream(body)
+	resp, err := client.PostResponsesStreamContext(r.Context(), body)
 	if err != nil {
 		reqLog(r).Error("responses stream connect failed", "model", model.APIName(), "error", err)
 		writeStreamError(w, flusher, "上游 Responses 接口调用失败: "+err.Error())
@@ -407,41 +450,53 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 	msgID := NewMessageID()
 	st := &responsesStreamState{
 		w: w, flusher: flusher, msgID: msgID, displayModel: model.DisplayName(),
+		toolsByItem: make(map[string]*anthropicToolStream),
+		toolsByCall: make(map[string]*anthropicToolStream),
 	}
 	st.emitMessageStart(req)
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := unwrapNativeAnthropicSSE(scanner.Text())
-		if line == "" || !strings.HasPrefix(line, "{") {
+	for read := range common.ReadSSE(r.Context(), resp.Body) {
+		if read.Err != nil {
+			reqLog(r).Error("responses stream read error", "error", read.Err)
+			st.closeText()
+			st.closeAllTools()
+			store.SetRequestError(r, http.StatusBadGateway, "stream_read_error: "+read.Err.Error())
+			writeStreamError(w, flusher, "读取上游流式响应失败，本次回复可能不完整，请重试。原始错误: "+read.Err.Error())
+			return
+		}
+		if read.Event.Done {
+			break
+		}
+		data := common.UnwrapSSEData(read.Event.Data)
+		if data == "" || !strings.HasPrefix(data, "{") {
 			continue
 		}
 		var ev responsesStreamEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
 			continue
 		}
 		st.handleEvent(&ev)
 		if st.streamError != "" {
 			st.closeText()
-			st.closeTool()
+			st.closeAllTools()
 			store.SetRequestError(r, http.StatusBadGateway, "upstream_error: "+st.streamError)
 			reqLog(r).Error("responses stream upstream failure", "type", st.terminal, "error", st.streamError)
 			writeStreamError(w, flusher, st.streamError)
 			return
 		}
+		if st.sawTerminal {
+			st.finish("end_turn")
+			if st.inTokens > 0 || st.outTokens > 0 {
+				store.SetTokenUsage(r, st.inTokens, st.outTokens)
+			}
+			reqLog(r).Info("responses stream done", "model", model.APIName(), "blocks", st.nextIndex, "in", st.inTokens, "out", st.outTokens)
+			return
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		reqLog(r).Error("responses stream read error", "error", err)
-		st.closeText()
-		st.closeTool()
-		store.SetRequestError(r, http.StatusBadGateway, "stream_read_error: "+err.Error())
-		writeStreamError(w, flusher, "读取上游流式响应失败，本次回复可能不完整，请重试。原始错误: "+err.Error())
-		return
-	}
+
 	if !st.sawTerminal {
 		st.closeText()
-		st.closeTool()
+		st.closeAllTools()
 		message := "上游 Responses 流在返回结束标记前断开，本次回复可能不完整，请重试。"
 		store.SetRequestError(r, http.StatusBadGateway, "stream_truncated: upstream closed before terminal event")
 		reqLog(r).Warn("responses stream closed before terminal event", "blocks", st.nextIndex)
@@ -456,6 +511,13 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 	reqLog(r).Info("responses stream done", "model", model.APIName(), "blocks", st.nextIndex, "in", st.inTokens, "out", st.outTokens)
 }
 
+type anthropicToolStream struct {
+	index  int
+	callID string
+	name   string
+	open   bool
+}
+
 // responsesStreamState tracks the Anthropic-side block indices and open blocks
 // while translating a Responses stream.
 type responsesStreamState struct {
@@ -467,8 +529,8 @@ type responsesStreamState struct {
 	nextIndex   int
 	textOpen    bool
 	textIndex   int
-	toolOpen    bool
-	toolIndex   int
+	toolsByItem map[string]*anthropicToolStream
+	toolsByCall map[string]*anthropicToolStream
 	stopReason  string
 	finished    bool
 	sawTerminal bool
@@ -507,7 +569,6 @@ func (s *responsesStreamState) handleEvent(ev *responsesStreamEvent) {
 			return
 		}
 		if !s.textOpen {
-			s.closeTool()
 			s.textIndex = s.nextIndex
 			s.nextIndex++
 			s.textOpen = true
@@ -525,36 +586,50 @@ func (s *responsesStreamState) handleEvent(ev *responsesStreamEvent) {
 		if ev.Item.Type != "function_call" {
 			return
 		}
-		s.closeText()
-		s.closeTool()
-		s.toolIndex = s.nextIndex
-		s.nextIndex++
-		s.toolOpen = true
-		id := ev.Item.CallID
-		if id == "" {
-			id = NewToolUseID()
+		itemID := ev.Item.ID
+		callID := ev.Item.CallID
+		if callID == "" {
+			callID = NewToolUseID()
 		}
+		tool := &anthropicToolStream{index: s.nextIndex, callID: callID, name: ev.Item.Name, open: true}
+		s.nextIndex++
+		if itemID != "" {
+			s.toolsByItem[itemID] = tool
+		}
+		s.toolsByCall[callID] = tool
+		s.stopReason = "tool_use"
 		s.send("content_block_start", sseContentBlockStart{
-			Type: "content_block_start", Index: s.toolIndex,
+			Type: "content_block_start", Index: tool.index,
 			ContentBlock: ContentBlock{
-				Type: "tool_use", ID: id, Name: ev.Item.Name,
+				Type: "tool_use", ID: callID, Name: ev.Item.Name,
 				Input: map[string]interface{}{},
 			},
 		})
 
 	case "response.function_call_arguments.delta":
-		if !s.toolOpen || ev.Delta == "" {
+		if ev.Delta == "" {
+			return
+		}
+		tool := s.findTool(ev.ItemID, ev.CallID)
+		if tool == nil || !tool.open {
+			s.streamError = "cannot route function arguments delta to a tool call"
 			return
 		}
 		s.send("content_block_delta", sseContentBlockDelta{
-			Type: "content_block_delta", Index: s.toolIndex,
+			Type: "content_block_delta", Index: tool.index,
 			Delta: deltaText{Type: "input_json_delta", PartialJSON: ev.Delta},
 		})
 
 	case "response.output_item.done":
 		if ev.Item.Type == "function_call" {
 			s.stopReason = "tool_use"
-			s.closeTool()
+			tool := s.findTool(ev.Item.ID, ev.Item.CallID)
+			if tool == nil {
+				tool = s.findTool(ev.ItemID, ev.CallID)
+			}
+			if tool != nil {
+				s.closeTool(tool)
+			}
 		}
 
 	case "response.completed":
@@ -609,14 +684,48 @@ func (s *responsesStreamState) closeText() {
 	s.textOpen = false
 }
 
-func (s *responsesStreamState) closeTool() {
-	if !s.toolOpen {
+func (s *responsesStreamState) findTool(itemID, callID string) *anthropicToolStream {
+	if itemID != "" {
+		if tool := s.toolsByItem[itemID]; tool != nil {
+			return tool
+		}
+	}
+	if callID != "" {
+		return s.toolsByCall[callID]
+	}
+	var only *anthropicToolStream
+	for _, tool := range s.toolsByCall {
+		if !tool.open {
+			continue
+		}
+		if only != nil && only != tool {
+			return nil
+		}
+		only = tool
+	}
+	return only
+}
+
+func (s *responsesStreamState) closeTool(tool *anthropicToolStream) {
+	if tool == nil || !tool.open {
 		return
 	}
-	s.send("content_block_stop", sseContentBlockStop{
-		Type: "content_block_stop", Index: s.toolIndex,
-	})
-	s.toolOpen = false
+	s.send("content_block_stop", sseContentBlockStop{Type: "content_block_stop", Index: tool.index})
+	tool.open = false
+}
+
+func (s *responsesStreamState) closeAllTools() {
+	byIndex := make(map[int]*anthropicToolStream)
+	for _, tool := range s.toolsByCall {
+		if tool.open {
+			byIndex[tool.index] = tool
+		}
+	}
+	for index := 0; index < s.nextIndex; index++ {
+		if tool := byIndex[index]; tool != nil {
+			s.closeTool(tool)
+		}
+	}
 }
 
 // finish closes any open blocks and emits message_delta + message_stop exactly
@@ -627,7 +736,7 @@ func (s *responsesStreamState) finish(defaultReason string) {
 	}
 	s.finished = true
 	s.closeText()
-	s.closeTool()
+	s.closeAllTools()
 
 	reason := s.stopReason
 	if reason == "" {

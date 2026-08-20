@@ -443,9 +443,7 @@ func TranslateResponsesToChat(raw map[string]interface{}, model string) (map[str
 		case "content_filter", "safety_filter":
 			finish = "content_filter"
 		default:
-			if text.Len() == 0 && len(toolCalls) == 0 {
-				return nil, 0, 0, fmt.Errorf("upstream response incomplete: %s", ro.IncompleteDetails.Reason)
-			}
+			return nil, 0, 0, fmt.Errorf("upstream response incomplete: %s", ro.IncompleteDetails.Reason)
 		}
 	}
 
@@ -509,7 +507,7 @@ func (s *Server) handleResponsesNonStream(w http.ResponseWriter, r *http.Request
 		writeOpenAIError(w, 400, err.Error(), "invalid_request_error", "invalid_request", "")
 		return
 	}
-	raw, err := client.PostResponses(body)
+	raw, err := client.PostResponsesContext(r.Context(), body)
 	if err != nil {
 		status := upstreamHTTPStatus(err)
 		errorType := "api_error"
@@ -523,6 +521,10 @@ func (s *Server) handleResponsesNonStream(w http.ResponseWriter, r *http.Request
 	}
 	out, inTk, outTk, err := TranslateResponsesToChat(raw, model.DisplayName())
 	if err != nil {
+		if usage, ok := raw["usage"].(map[string]interface{}); ok {
+			store.SetTokenUsage(r, numberToInt(usage["input_tokens"]), numberToInt(usage["output_tokens"]))
+		}
+		store.SetRequestError(r, http.StatusBadGateway, "upstream Responses status error: "+err.Error())
 		writeError(w, 502, "解析上游 Responses 响应失败: "+err.Error())
 		return
 	}
@@ -581,7 +583,7 @@ func (s *Server) handleResponsesStream(w http.ResponseWriter, r *http.Request, c
 	state := newChatResponsesStreamState(w, flusher, r, model.DisplayName(), req.StreamOptions != nil && req.StreamOptions.IncludeUsage)
 	state.emitStart()
 
-	reads := readResponsesSSE(resp.Body)
+	reads := readResponsesSSE(r.Context(), resp.Body)
 	heartbeat := time.NewTicker(5 * time.Second)
 	defer heartbeat.Stop()
 	for {

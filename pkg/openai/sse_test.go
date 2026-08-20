@@ -1,13 +1,14 @@
 package openai
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
 
 func collectChatReads(input string) []chatStreamRead {
 	var out []chatStreamRead
-	for item := range readChatSSE(strings.NewReader(input)) {
+	for item := range readChatSSE(context.Background(), strings.NewReader(input)) {
 		out = append(out, item)
 	}
 	return out
@@ -46,6 +47,16 @@ func TestReadChatSSE_BusinessError(t *testing.T) {
 func TestReadChatSSE_InvalidJSON(t *testing.T) {
 	items := collectChatReads("data: {bad}\n\n")
 	if len(items) != 1 || items[0].Err == nil {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
+func TestReadChatSSE_MultilineData(t *testing.T) {
+	input := `data: {"choices":[{"delta":{"content":"hello"},` + "\n" +
+		`data: "finish_reason":null}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	items := collectChatReads(input)
+	if len(items) != 2 || items[0].Err != nil || !strings.Contains(items[0].Data, "hello") || !items[1].Done {
 		t.Fatalf("items = %#v", items)
 	}
 }

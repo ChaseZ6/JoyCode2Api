@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -110,7 +111,7 @@ func TestNativeResponses_StreamPassThrough(t *testing.T) {
 
 func collectNativeReads(input string) []nativeResponsesRead {
 	var reads []nativeResponsesRead
-	for item := range readNativeResponsesSSE(strings.NewReader(input)) {
+	for item := range readNativeResponsesSSE(context.Background(), strings.NewReader(input)) {
 		reads = append(reads, item)
 	}
 	return reads
@@ -269,5 +270,31 @@ func TestNativeResponses_RateLimitEventIsClassified(t *testing.T) {
 	outcome := store.GetRequestOutcome(req)
 	if outcome.StatusCode != http.StatusTooManyRequests || !strings.Contains(outcome.Error, "rate_limit_error") {
 		t.Errorf("outcome = %+v", outcome)
+	}
+}
+
+func TestNativeResponsesNonStream_FailedMarksOutcomeButPreservesResponse(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{gptSolModel()})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_1","object":"response","status":"failed","error":null,"output":[],"usage":{"input_tokens":7,"output_tokens":0}}`))
+	}))
+	defer backend.Close()
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","input":"hello"}`))
+	req = store.InitTokenUsage(req)
+	req = store.InitRequestOutcome(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"failed"`) {
+		t.Fatalf("native response must be preserved: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if outcome := store.GetRequestOutcome(req); outcome.StatusCode != http.StatusBadGateway || !strings.Contains(outcome.Error, "upstream_error") {
+		t.Errorf("outcome = %+v", outcome)
+	}
+	if inTk, outTk := store.GetTokenUsage(req); inTk != 7 || outTk != 0 {
+		t.Errorf("usage = %d/%d", inTk, outTk)
 	}
 }

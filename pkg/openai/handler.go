@@ -161,7 +161,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	// Prefer this request's own account, so the list reflects what that account
 	// can actually use. Fall back to the registry (cached live data, or the
 	// static snapshot) so a brief upstream outage does not empty the list.
-	models, err := s.getClient(r).ListModels()
+	models, err := s.getClient(r).ListModelsContext(r.Context())
 	if err != nil {
 		slog.Warn("list models upstream failed; serving registry list", "error", err)
 		models = joycode.DefaultRegistry.Visible()

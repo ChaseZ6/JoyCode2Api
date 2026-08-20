@@ -1,13 +1,14 @@
 package openai
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 )
 
@@ -56,37 +57,41 @@ type chatStreamRead struct {
 	Err          error
 }
 
-func readChatSSE(body io.Reader) <-chan chatStreamRead {
+func readChatSSE(ctx context.Context, body io.Reader) <-chan chatStreamRead {
 	out := make(chan chatStreamRead)
 	go func() {
 		defer close(out)
-		scanner := bufio.NewScanner(body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" || strings.HasPrefix(line, ":") || strings.HasPrefix(line, "event:") {
-				continue
+		send := func(item chatStreamRead) bool {
+			select {
+			case out <- item:
+				return true
+			case <-ctx.Done():
+				return false
 			}
-			for strings.HasPrefix(line, "data: ") {
-				line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+		}
+		for read := range common.ReadSSE(ctx, body) {
+			if read.Err != nil {
+				send(chatStreamRead{Err: fmt.Errorf("read chat stream: %w", read.Err)})
+				return
 			}
-			if line == "[DONE]" {
-				out <- chatStreamRead{Done: true}
-				continue
+			if read.Event.Done {
+				send(chatStreamRead{Done: true})
+				return
 			}
-			if !strings.HasPrefix(line, "{") {
+			data := common.UnwrapSSEData(read.Event.Data)
+			if data == "" || !strings.HasPrefix(data, "{") {
 				continue
 			}
 			var raw map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &raw); err != nil {
-				out <- chatStreamRead{Err: fmt.Errorf("invalid chat stream JSON: %w", err)}
+			if err := json.Unmarshal([]byte(data), &raw); err != nil {
+				send(chatStreamRead{Err: fmt.Errorf("invalid chat stream JSON: %w", err)})
 				return
 			}
 			if err := joycode.DetectBusinessError(raw); err != nil {
-				out <- chatStreamRead{BusinessErr: err}
+				send(chatStreamRead{BusinessErr: err})
 				return
 			}
-			item := chatStreamRead{Data: line}
+			item := chatStreamRead{Data: data}
 			if usage, ok := raw["usage"].(map[string]interface{}); ok {
 				item.InputTokens = numberToInt(usage["prompt_tokens"])
 				item.OutputTokens = numberToInt(usage["completion_tokens"])
@@ -100,10 +105,9 @@ func readChatSSE(body io.Reader) <-chan chatStreamRead {
 					}
 				}
 			}
-			out <- item
-		}
-		if err := scanner.Err(); err != nil {
-			out <- chatStreamRead{Err: fmt.Errorf("read chat stream: %w", err)}
+			if !send(item) {
+				return
+			}
 		}
 	}()
 	return out

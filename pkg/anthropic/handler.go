@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -154,7 +155,7 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		jcResp, lastErr = client.Post(chatEndpoint, jcBody)
+		jcResp, lastErr = client.PostContext(r.Context(), chatEndpoint, jcBody)
 		if lastErr != nil {
 			if isContextLimitError(lastErr.Error()) {
 				// Progressive truncation on context limit
@@ -169,7 +170,7 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 			}
 			reqLog(r).Error("non-stream retry error", "attempt", attempt, "max", maxRetries, "error", lastErr)
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
 			}
 			continue
 		}
@@ -535,9 +536,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		}
 		if err := scanner.Err(); err != nil {
 			reqLog(r).Error("stream ended abnormally before finish_reason", "error", err, "chunks", chunkCount)
+			store.SetRequestError(r, http.StatusBadGateway, "stream_read_error: "+err.Error())
 			writeStreamError(w, flusher, "读取上游流式响应失败，本次回复不完整，请重试。原始错误: "+err.Error())
 		} else {
 			reqLog(r).Warn("stream closed before finish_reason (premature upstream close)", "chunks", chunkCount)
+			store.SetRequestError(r, http.StatusBadGateway, "stream_truncated: upstream closed before finish_reason")
 			writeStreamError(w, flusher, "上游在返回结束标记前断开了流式响应，本次回复可能不完整，请重试。")
 		}
 	}
@@ -859,12 +862,12 @@ func (h *Handler) connectNativeAnthropicStreamWithRetry(r *http.Request, body ma
 	}
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		resp, err := client.PostAnthropicStream(anthropicEndpoint, body)
+		resp, err := client.PostAnthropicStreamContext(r.Context(), anthropicEndpoint, body)
 		if err != nil {
 			lastErr = err
 			reqLog(r).Error("native anthropic stream connect error", "attempt", attempt, "max", maxRetries, "error", err)
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
 			}
 			continue
 		}
@@ -874,7 +877,7 @@ func (h *Handler) connectNativeAnthropicStreamWithRetry(r *http.Request, body ma
 			resp.Body.Close()
 			lastErr = fmt.Errorf("read first line: %w", err)
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
 			}
 			continue
 		}
@@ -882,7 +885,7 @@ func (h *Handler) connectNativeAnthropicStreamWithRetry(r *http.Request, body ma
 			resp.Body.Close()
 			lastErr = err
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
 			}
 			continue
 		}
@@ -968,12 +971,12 @@ func (h *Handler) connectStreamWithRetry(r *http.Request, jcBody map[string]inte
 	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		resp, err := client.PostStream(chatEndpoint, jcBody)
+		resp, err := client.PostStreamContext(r.Context(), chatEndpoint, jcBody)
 		if err != nil {
 			lastErr = err
 			reqLog(r).Error("stream connect error", "attempt", attempt, "max", maxRetries, "error", err)
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
 			}
 			continue
 		}
@@ -985,7 +988,7 @@ func (h *Handler) connectStreamWithRetry(r *http.Request, jcBody map[string]inte
 			lastErr = fmt.Errorf("read first line: %w", err)
 			reqLog(r).Error("stream read first line", "attempt", attempt, "max", maxRetries, "error", lastErr)
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
 			}
 			continue
 		}
@@ -1004,7 +1007,7 @@ func (h *Handler) connectStreamWithRetry(r *http.Request, jcBody map[string]inte
 				return nil, lastErr
 			}
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
 			}
 			continue
 		}
@@ -1152,6 +1155,17 @@ func writeContentFilterError(w http.ResponseWriter, msgs ...string) {
 		"type":  "error",
 		"error": map[string]string{"type": "invalid_request_error", "message": msg},
 	})
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func writeAnthropicRequestError(w http.ResponseWriter, msg string) {

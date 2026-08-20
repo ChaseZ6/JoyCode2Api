@@ -1,7 +1,7 @@
 package openai
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
@@ -172,7 +173,13 @@ func connectUpstreamStream(
 	result := make(chan upstreamStreamResult, 1)
 	go func() {
 		response, err := connect()
-		result <- upstreamStreamResult{Response: response, Err: err}
+		select {
+		case result <- upstreamStreamResult{Response: response, Err: err}:
+		case <-r.Context().Done():
+			if response != nil && response.Body != nil {
+				response.Body.Close()
+			}
+		}
 	}()
 
 	ticker := time.NewTicker(upstreamConnectHeartbeatInterval)
@@ -211,7 +218,7 @@ func connectResponsesStream(
 	body map[string]interface{},
 ) (*http.Response, bool) {
 	return connectUpstreamStream(w, flusher, r, func() (*http.Response, error) {
-		return client.PostResponsesStream(body)
+		return client.PostResponsesStreamContext(r.Context(), body)
 	})
 }
 
@@ -231,39 +238,47 @@ type responseStreamRead struct {
 	Err   error
 }
 
-func readResponsesSSE(body io.Reader) <-chan responseStreamRead {
+func readResponsesSSE(ctx context.Context, body io.Reader) <-chan responseStreamRead {
 	out := make(chan responseStreamRead)
 	go func() {
 		defer close(out)
-		scanner := bufio.NewScanner(body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			for strings.HasPrefix(line, "data: ") {
-				line = strings.TrimPrefix(line, "data: ")
+		send := func(item responseStreamRead) bool {
+			select {
+			case out <- item:
+				return true
+			case <-ctx.Done():
+				return false
 			}
-			line = strings.TrimSpace(line)
-			if line == "" || line == "[DONE]" || !strings.HasPrefix(line, "{") {
+		}
+		for read := range common.ReadSSE(ctx, body) {
+			if read.Err != nil {
+				send(responseStreamRead{Err: fmt.Errorf("read Responses stream: %w", read.Err)})
+				return
+			}
+			if read.Event.Done {
+				return
+			}
+			data := common.UnwrapSSEData(read.Event.Data)
+			if data == "" || !strings.HasPrefix(data, "{") {
 				continue
 			}
 			var raw map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &raw); err != nil {
-				out <- responseStreamRead{Err: fmt.Errorf("invalid Responses stream event: %w", err)}
+			if err := json.Unmarshal([]byte(data), &raw); err != nil {
+				send(responseStreamRead{Err: fmt.Errorf("invalid Responses stream event: %w", err)})
 				return
 			}
 			if err := joycode.DetectBusinessError(raw); err != nil {
-				out <- responseStreamRead{Err: err}
+				send(responseStreamRead{Err: err})
 				return
 			}
-			event, err := decodeResponsesStreamEvent([]byte(line))
+			event, err := decodeResponsesStreamEvent([]byte(data))
 			if err != nil {
-				out <- responseStreamRead{Err: fmt.Errorf("invalid Responses stream event: %w", err)}
+				send(responseStreamRead{Err: fmt.Errorf("invalid Responses stream event: %w", err)})
 				return
 			}
-			out <- responseStreamRead{Event: &event}
-		}
-		if err := scanner.Err(); err != nil {
-			out <- responseStreamRead{Err: fmt.Errorf("read Responses stream: %w", err)}
+			if !send(responseStreamRead{Event: &event}) {
+				return
+			}
 		}
 	}()
 	return out

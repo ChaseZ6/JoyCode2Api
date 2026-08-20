@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -372,9 +373,33 @@ func TestConnectUpstreamStream_SlowFailureUsesSSEError(t *testing.T) {
 }
 
 func TestReadResponsesSSE_BusinessError(t *testing.T) {
-	reads := readResponsesSSE(strings.NewReader(`data: {"code":"1","echo":"gateway failed"}` + "\n\n"))
+	reads := readResponsesSSE(context.Background(), strings.NewReader(`data: {"code":"1","echo":"gateway failed"}`+"\n\n"))
 	item, ok := <-reads
 	if !ok || item.Err == nil || !strings.Contains(item.Err.Error(), "gateway failed") {
+		t.Fatalf("item = %#v ok=%v", item, ok)
+	}
+}
+
+func TestTranslateResponsesToChat_RejectsUnknownIncompleteWithPartialOutput(t *testing.T) {
+	raw := map[string]interface{}{
+		"status":             "incomplete",
+		"incomplete_details": map[string]interface{}{"reason": "unknown_reason"},
+		"output": []interface{}{map[string]interface{}{
+			"type": "message", "content": []interface{}{map[string]interface{}{"type": "output_text", "text": "partial"}},
+		}},
+	}
+	if _, _, _, err := TranslateResponsesToChat(raw, "GPT-5.6 Sol"); err == nil {
+		t.Fatal("unknown incomplete response with partial output must be rejected")
+	}
+}
+
+func TestReadResponsesSSE_MultilineEvent(t *testing.T) {
+	input := "event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta",` + "\n" +
+		`data: "delta":"hello"}` + "\n\n"
+	reads := readResponsesSSE(context.Background(), strings.NewReader(input))
+	item, ok := <-reads
+	if !ok || item.Err != nil || item.Event == nil || item.Event.Type != "response.output_text.delta" || item.Event.Delta != "hello" {
 		t.Fatalf("item = %#v ok=%v", item, ok)
 	}
 }

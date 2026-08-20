@@ -1,14 +1,16 @@
 package openai
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
@@ -64,7 +66,7 @@ func (s *Server) handleNativeResponses(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNativeResponsesNonStream(w http.ResponseWriter, r *http.Request, client *joycode.Client, body map[string]interface{}) {
-	response, err := client.PostResponses(body)
+	response, err := client.PostResponsesContext(r.Context(), body)
 	if err != nil {
 		status := upstreamHTTPStatus(err)
 		errorType := "api_error"
@@ -77,6 +79,9 @@ func (s *Server) handleNativeResponsesNonStream(w http.ResponseWriter, r *http.R
 	}
 	if usage, ok := response["usage"].(map[string]interface{}); ok {
 		store.SetTokenUsage(r, intFromJSON(usage["input_tokens"]), intFromJSON(usage["output_tokens"]))
+	}
+	if message := nativeResponsesFailure(response); message != "" {
+		store.SetRequestError(r, http.StatusBadGateway, message)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -97,7 +102,7 @@ func (s *Server) handleNativeResponsesStream(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(http.StatusOK)
 	}
 
-	reads := readNativeResponsesSSE(response.Body)
+	reads := readNativeResponsesSSE(r.Context(), response.Body)
 	heartbeat := time.NewTicker(5 * time.Second)
 	defer heartbeat.Stop()
 	var inTk, outTk int
@@ -177,6 +182,9 @@ func (s *Server) handleNativeResponsesStream(w http.ResponseWriter, r *http.Requ
 			}
 			fmt.Fprintf(w, "data: %s\n\n", item.Data)
 			flusher.Flush()
+			if sawTerminal {
+				return
+			}
 		}
 	}
 }
@@ -193,35 +201,37 @@ type nativeResponsesRead struct {
 	Err              error
 }
 
-func readNativeResponsesSSE(body interface{ Read([]byte) (int, error) }) <-chan nativeResponsesRead {
+func readNativeResponsesSSE(ctx context.Context, body io.Reader) <-chan nativeResponsesRead {
 	out := make(chan nativeResponsesRead)
 	go func() {
 		defer close(out)
-		scanner := bufio.NewScanner(body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		var dataLines []string
-		emit := func() bool {
-			if len(dataLines) == 0 {
+		send := func(item nativeResponsesRead) bool {
+			select {
+			case out <- item:
 				return true
+			case <-ctx.Done():
+				return false
 			}
-			data := strings.Join(dataLines, "\n")
-			dataLines = dataLines[:0]
-			for strings.HasPrefix(data, "data:") {
-				data = strings.TrimSpace(strings.TrimPrefix(data, "data:"))
+		}
+		for read := range common.ReadSSE(ctx, body) {
+			if read.Err != nil {
+				send(nativeResponsesRead{Err: fmt.Errorf("read Responses SSE: %w", read.Err)})
+				return
 			}
-			if data == "" || data == "[DONE]" || !strings.HasPrefix(data, "{") {
-				return true
+			data := common.UnwrapSSEData(read.Event.Data)
+			if data == "" || read.Event.Done || !strings.HasPrefix(data, "{") {
+				continue
 			}
 			var raw map[string]interface{}
 			decoder := json.NewDecoder(strings.NewReader(data))
 			decoder.UseNumber()
 			if err := decoder.Decode(&raw); err != nil {
-				out <- nativeResponsesRead{Err: fmt.Errorf("invalid Responses SSE event: %w", err)}
-				return false
+				send(nativeResponsesRead{Err: fmt.Errorf("invalid Responses SSE event: %w", err)})
+				return
 			}
 			if err := joycode.DetectBusinessError(raw); err != nil {
-				out <- nativeResponsesRead{Err: err}
-				return false
+				send(nativeResponsesRead{Err: err})
+				return
 			}
 			item := nativeResponsesRead{Data: data}
 			eventType, _ := raw["type"].(string)
@@ -253,35 +263,32 @@ func readNativeResponsesSSE(body interface{ Read([]byte) (int, error) }) <-chan 
 					item.HasUsage = true
 				}
 			}
-			out <- item
-			return true
-		}
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.TrimSpace(line) == "" {
-				if !emit() {
-					return
-				}
-				continue
+			if !send(item) {
+				return
 			}
-			trimmed := strings.TrimLeft(line, " \t")
-			if strings.HasPrefix(trimmed, ":") || strings.HasPrefix(trimmed, "event:") ||
-				strings.HasPrefix(trimmed, "id:") || strings.HasPrefix(trimmed, "retry:") {
-				continue
-			}
-			if strings.HasPrefix(trimmed, "data:") {
-				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
-			}
-		}
-		if !emit() {
-			return
-		}
-		if err := scanner.Err(); err != nil {
-			out <- nativeResponsesRead{Err: fmt.Errorf("read Responses SSE: %w", err)}
 		}
 	}()
 	return out
+}
+
+func nativeResponsesFailure(response map[string]interface{}) string {
+	if errValue := response["error"]; errValue != nil {
+		return "upstream_error: " + responseErrorMessage(errValue)
+	}
+	status, _ := response["status"].(string)
+	if status == "failed" {
+		return "upstream_error: upstream response failed without error details"
+	}
+	if status == "incomplete" {
+		reason := ""
+		if details, ok := response["incomplete_details"].(map[string]interface{}); ok {
+			reason, _ = details["reason"].(string)
+		}
+		if reason != "max_output_tokens" {
+			return "response_incomplete: " + reason
+		}
+	}
+	return ""
 }
 
 func intFromJSON(value interface{}) int {

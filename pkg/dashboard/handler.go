@@ -1159,7 +1159,7 @@ func (h *Handler) listAccountModels(w http.ResponseWriter, r *http.Request, apiK
 	if creds, cerr := auth.LoadFromSystem(); cerr == nil {
 		client.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
 	}
-	models, err := client.ListModels()
+	models, err := client.ListModelsContext(r.Context())
 	if err != nil {
 		slog.Error("list account models", "api_key", apiKey, "error", err)
 		// Fall back to the registry (cached live data, or the static snapshot).
