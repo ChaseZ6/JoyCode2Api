@@ -560,6 +560,18 @@ func TestParseStreamChunk_ToolCallsDelta(t *testing.T) {
 	}
 }
 
+func TestParseStreamChunk_ToolArgumentsObject(t *testing.T) {
+	line := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"Write","arguments":{"file_path":"/tmp/a.go"}}}]}}]}`
+	chunk := ParseStreamChunk(line)
+	if chunk == nil {
+		t.Fatal("object-shaped tool arguments must be accepted")
+	}
+	got := string(chunk.Choices[0].Delta.ToolCalls[0].Function.Arguments)
+	if got != `{"file_path":"/tmp/a.go"}` {
+		t.Fatalf("arguments = %q, want normalized JSON object", got)
+	}
+}
+
 func TestParseStreamChunk_FinishReason(t *testing.T) {
 	// Case 26: Chunk with finish_reason.
 	line := `data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}`

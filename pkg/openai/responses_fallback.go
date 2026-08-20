@@ -152,7 +152,7 @@ func chatMessageToResponsesItems(message map[string]interface{}) []map[string]in
 			}
 			fn, _ := call["function"].(map[string]interface{})
 			name, _ := fn["name"].(string)
-			args, _ := fn["arguments"].(string)
+			args, _ := joycode.NormalizeToolArguments(fn["arguments"])
 			callID, _ := call["id"].(string)
 			if callID == "" {
 				callID = "call_" + newShortID()
@@ -214,19 +214,23 @@ func (s *Server) handleResponsesViaChatStream(w http.ResponseWriter, r *http.Req
 						state.fail("upstream stream ended before a terminal event", "stream_truncated")
 					}
 				}
+				writeSSEDone(w, flusher)
 				return
 			}
 			if item.Err != nil {
 				state.fail(item.Err.Error(), "stream_read_error")
+				writeSSEDone(w, flusher)
 				return
 			}
 			if item.BusinessErr != nil {
 				state.fail(item.BusinessErr.Error(), "upstream_error")
+				writeSSEDone(w, flusher)
 				return
 			}
 			if item.Done {
 				// [DONE] without finish_reason: complete with what we have.
 				state.complete()
+				writeSSEDone(w, flusher)
 				return
 			}
 			if item.InputTokens > 0 || item.OutputTokens > 0 {
@@ -234,6 +238,7 @@ func (s *Server) handleResponsesViaChatStream(w http.ResponseWriter, r *http.Req
 			}
 			if err := state.consumeChunk(item.Data, item.FinishReason); err != nil {
 				state.fail(err.Error(), "upstream_protocol_error")
+				writeSSEDone(w, flusher)
 				return
 			}
 		}
@@ -420,8 +425,8 @@ func (s *responsesFromChatStreamState) consumeChunk(data string, finishReason st
 					ID       string `json:"id"`
 					Type     string `json:"type"`
 					Function struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
+						Name      string                `json:"name"`
+						Arguments joycode.ToolArguments `json:"arguments"`
 					} `json:"function"`
 				} `json:"tool_calls"`
 			} `json:"delta"`
@@ -488,10 +493,11 @@ func (s *responsesFromChatStreamState) consumeChunk(data string, finishReason st
 			})
 		}
 		if tc.Function.Arguments != "" {
-			tool.Args.WriteString(tc.Function.Arguments)
+			args := string(tc.Function.Arguments)
+			tool.Args.WriteString(args)
 			s.emit("response.function_call_arguments.delta", map[string]interface{}{
 				"item_id": tool.ItemID, "output_index": tool.OutputIndex,
-				"delta": tc.Function.Arguments,
+				"delta": args,
 			})
 		}
 	}

@@ -489,9 +489,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			if tc.Function.Name != "" {
 				toolCalls[idx].Name = tc.Function.Name
 			}
-			toolCalls[idx].Arguments += tc.Function.Arguments
+			toolCalls[idx].Arguments += string(tc.Function.Arguments)
 			// Temporary diagnostics for the missing file_path investigation
-			if strings.Contains(tc.Function.Arguments, "}{") {
+			if strings.Contains(string(tc.Function.Arguments), "}{") {
 				reqLog(r).Warn("tool arguments chunk contains json boundary", "index", idx, "name", toolCalls[idx].Name, "chunk", tc.Function.Arguments)
 			}
 		}
@@ -549,6 +549,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 					stopReason = "max_tokens"
 				case "stop":
 					stopReason = "end_turn"
+				}
+				// Some chat-completions gateways (including Kimi variants) emit
+				// finish_reason=stop even when tool deltas were present. Anthropic
+				// clients must receive tool_use in that case or they treat the turn
+				// as final and stop without executing the tool.
+				if len(toolCalls) > 0 && fr != "length" {
+					stopReason = "tool_use"
 				}
 				FormatSSE(w, "message_delta", sseMessageDelta{
 					Type:  "message_delta",

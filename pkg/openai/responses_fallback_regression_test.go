@@ -336,6 +336,54 @@ func TestChatFallbackStream_TruncatedToolArgumentsFallBackToEmptyObject(t *testi
 	}
 }
 
+func TestChatFallbackStream_ObjectToolArguments(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{kimiModel()})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		chunks := []string{
+			`{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Write","arguments":{"file_path":"/tmp/a.go"}}}]}}]}`,
+			`{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		}
+		for _, c := range chunks {
+			io.WriteString(w, "data: "+c+"\n\n")
+			flusher.Flush()
+		}
+		io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"Kimi-K3","input":"write file","stream":true}`))
+	req = store.InitTokenUsage(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var completed map[string]interface{}
+	for _, ev := range collectSSE(rec.Body.String()) {
+		if ev["type"] == "response.completed" {
+			completed, _ = ev["response"].(map[string]interface{})
+		}
+	}
+	if completed == nil {
+		t.Fatalf("no response.completed in stream:\n%s", rec.Body.String())
+	}
+	output, _ := completed["output"].([]interface{})
+	if len(output) != 1 {
+		t.Fatalf("output items = %v", output)
+	}
+	item, _ := output[0].(map[string]interface{})
+	if got := item["arguments"]; got != `{"file_path":"/tmp/a.go"}` {
+		t.Fatalf("arguments = %v", got)
+	}
+}
+
 // TestChatFallbackNonStream_RetriesTransientFailures verifies the bridged
 // non-stream path retries transient upstream errors (5xx) instead of failing
 // the Codex request on the first attempt.

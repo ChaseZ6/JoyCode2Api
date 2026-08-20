@@ -266,7 +266,7 @@ func TranslateResponse(jcResp map[string]interface{}, reqModel string) *MessageR
 			tcMap, _ := tc.(map[string]interface{})
 			fn, _ := tcMap["function"].(map[string]interface{})
 			name, _ := fn["name"].(string)
-			argsStr, _ := fn["arguments"].(string)
+			argsStr, _ := joycode.NormalizeToolArguments(fn["arguments"])
 			id, _ := tcMap["id"].(string)
 			if id == "" {
 				id = "toolu_" + newID()
@@ -653,8 +653,8 @@ type StreamChunk struct {
 				Index    int    `json:"index"`
 				Type     string `json:"type"`
 				Function struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
+					Name      string                `json:"name"`
+					Arguments joycode.ToolArguments `json:"arguments"`
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"delta"`

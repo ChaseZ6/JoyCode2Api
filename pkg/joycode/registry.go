@@ -272,6 +272,7 @@ func StaticModels() []ModelInfo {
 		{Label: "MiniMax-M3", ChatAPIModel: "MiniMax-M3", MaxTotalTokens: 200000, RespMaxTokens: 64000},
 		{Label: "MiniMax-M2.7", ChatAPIModel: "MiniMax-M2.7", MaxTotalTokens: 200000, RespMaxTokens: 64000},
 		{Label: "Kimi-K2.6", ChatAPIModel: "Kimi-K2.6", MaxTotalTokens: 200000, RespMaxTokens: 64000},
+		{Label: "Kimi-K3", ChatAPIModel: "Kimi-K3", MaxTotalTokens: 200000, RespMaxTokens: 64000},
 		{Label: "GLM-5.2", ChatAPIModel: "GLM-5.2", MaxTotalTokens: 200000, RespMaxTokens: 64000},
 		{Label: "GLM-5.2-jcloud", ChatAPIModel: "GLM-5.2-jcloud", MaxTotalTokens: 200000, RespMaxTokens: 64000},
 		{Label: "GLM-5.1", ChatAPIModel: "GLM-5.1", MaxTotalTokens: 200000, RespMaxTokens: 64000},

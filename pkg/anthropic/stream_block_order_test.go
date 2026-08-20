@@ -120,3 +120,15 @@ func TestStream_ToolTextToolBlocks(t *testing.T) {
 	t.Logf("start idxs: %v stop idxs: %v", idxsOf(parseSSE(t, out), "content_block_start"), idxsOf(parseSSE(t, out), "content_block_stop"))
 	checkBlockInvariants(t, parseSSE(t, out))
 }
+
+func TestStream_ToolCallWithStopFinishReasonUsesToolUse(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c0\",\"function\":{\"name\":\"Write\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/a.go\\\"}\"}}]}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+	out := runStream(t, bodyOf(sse))
+	if !strings.Contains(out, `"stop_reason":"tool_use"`) {
+		t.Fatalf("tool call with finish_reason=stop must remain tool_use:\n%s", out)
+	}
+	if strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Fatalf("tool call must not be reported as end_turn:\n%s", out)
+	}
+}

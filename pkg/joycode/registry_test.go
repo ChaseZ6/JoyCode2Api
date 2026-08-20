@@ -41,6 +41,15 @@ func TestRegistry_ResolveByLabelAndAPIName(t *testing.T) {
 	}
 }
 
+func TestStaticModels_ContainsKimiK3(t *testing.T) {
+	for _, model := range StaticModels() {
+		if model.Label == "Kimi-K3" && model.APIName() == "Kimi-K3" {
+			return
+		}
+	}
+	t.Fatal("static model fallback must contain Kimi-K3")
+}
+
 func TestRegistry_ResolveNormalisesSpacesAndCase(t *testing.T) {
 	r := NewRegistry(time.Minute)
 	r.Seed(testModels())
