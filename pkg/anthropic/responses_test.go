@@ -456,3 +456,18 @@ func TestTranslateResponsesToAnthropic_RejectsFailedAndUnknownIncomplete(t *test
 		}
 	}
 }
+
+func TestTranslateAnthropicToResponses_Effort(t *testing.T) {
+	for requested, want := range map[string]string{"none": "none", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max", "extra": "xhigh"} {
+		req := &MessageRequest{Messages: []MessageParam{{Role: "user", Content: json.RawMessage(`"hi"`)}}, OutputConfig: &OutputConfig{Effort: requested}}
+		body := TranslateAnthropicToResponses(req, solModel())
+		reasoning, ok := body["reasoning"].(map[string]interface{})
+		if !ok || reasoning["effort"] != want {
+			t.Errorf("effort %s => %#v", requested, body["reasoning"])
+		}
+	}
+	req := &MessageRequest{Messages: []MessageParam{{Role: "user", Content: json.RawMessage(`"hi"`)}}}
+	if _, exists := TranslateAnthropicToResponses(req, solModel())["reasoning"]; exists {
+		t.Fatal("reasoning emitted without effort")
+	}
+}

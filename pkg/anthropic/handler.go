@@ -47,6 +47,31 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 		common.ApplyLocalCORS(w, r, "POST, OPTIONS", "Content-Type, Authorization, X-API-Key, Anthropic-Version, Anthropic-Beta")
 		h.handleMessages(w, r)
 	})
+	mux.HandleFunc("/v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) {
+		common.ApplyLocalCORS(w, r, "POST, OPTIONS", "Content-Type, Authorization, X-API-Key, Anthropic-Version, Anthropic-Beta")
+		h.handleCountTokens(w, r)
+	})
+}
+
+func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAnthropicError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req MessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAnthropicRequestError(w, "请求体解析失败: "+err.Error())
+		return
+	}
+	if len(req.Messages) == 0 {
+		writeAnthropicRequestError(w, "messages must not be empty")
+		return
+	}
+	writeAnthropicJSON(w, http.StatusOK, map[string]int{"input_tokens": EstimateInputTokens(&req)})
 }
 
 func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +118,12 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Responses API; both chat/completions and the native Anthropic endpoint
 	// reject them with the opaque error 1032.
 	if info.Adapter() == joycode.AdapterOpenAIResponse {
+		if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
+			if _, ok := normalizeResponsesEffort(req.OutputConfig.Effort); !ok {
+				writeAnthropicRequestError(w, "output_config.effort must be one of none, low, medium, high, xhigh, max, or extra")
+				return
+			}
+		}
 		if req.Stream {
 			flusher, ok := w.(http.Flusher)
 			if !ok {

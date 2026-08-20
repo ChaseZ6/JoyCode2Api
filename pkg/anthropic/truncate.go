@@ -16,20 +16,39 @@ const (
 	maxTruncationRounds = 5
 )
 
-// estimateTokens gives a rough token count estimate for the request messages.
-// Uses byte-length / bytesPerToken as approximation. Overestimates slightly which is safe.
-func estimateTokens(req *MessageRequest) int {
-	totalBytes := 0
-	if req.System != nil {
-		totalBytes += len(req.System)
+// EstimateInputTokens provides a deterministic local estimate for Anthropic
+// compatibility endpoints. It is not a model tokenizer, but includes the
+// structural inputs that clients expect count_tokens to reflect.
+func EstimateInputTokens(req *MessageRequest) int {
+	totalBytes := len(req.System) + len(req.ToolChoice)
+	for _, tool := range req.Tools {
+		encoded, _ := json.Marshal(tool)
+		totalBytes += len(encoded) + 32
 	}
-	for _, m := range req.Messages {
-		totalBytes += len(m.Content)
+	for _, message := range req.Messages {
+		totalBytes += 16 + len(message.Role)
+		var blocks []contentBlock
+		if json.Unmarshal(message.Content, &blocks) != nil {
+			totalBytes += len(message.Content)
+			continue
+		}
+		for _, block := range blocks {
+			totalBytes += 24 + len(block.Type) + len(block.Text) + len(block.ID) + len(block.Name) + len(block.Input) + len(block.ToolUseID) + len(block.Content)
+			if block.Type == "image" {
+				// Avoid counting an entire base64 payload as text. A conservative
+				// visual budget is closer to real multimodal tokenization.
+				totalBytes += int(1600 * bytesPerToken)
+			}
+		}
 	}
 	if totalBytes == 0 {
 		return 0
 	}
-	return int(float64(totalBytes) / bytesPerToken)
+	return int(float64(totalBytes)/bytesPerToken + 0.999)
+}
+
+func estimateTokens(req *MessageRequest) int {
+	return EstimateInputTokens(req)
 }
 
 // PreemptiveTruncate checks if the request likely exceeds the model's context limit

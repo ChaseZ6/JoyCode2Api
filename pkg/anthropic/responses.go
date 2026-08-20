@@ -48,7 +48,25 @@ func TranslateAnthropicToResponses(req *MessageRequest, model joycode.ModelInfo)
 			}
 		}
 	}
+	if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
+		if effort, ok := normalizeResponsesEffort(req.OutputConfig.Effort); ok {
+			body["reasoning"] = map[string]interface{}{"effort": effort}
+		}
+	}
 	return body
+}
+
+func normalizeResponsesEffort(effort string) (string, bool) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "extra" {
+		return "xhigh", true
+	}
+	switch effort {
+	case "none", "low", "medium", "high", "xhigh", "max":
+		return effort, true
+	default:
+		return "", false
+	}
 }
 
 // responsesInstructions flattens an Anthropic system prompt (string or block

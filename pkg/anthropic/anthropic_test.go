@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -273,5 +274,39 @@ func TestAnthropicResponseFormat(t *testing.T) {
 	}
 	if parsed["role"] != "assistant" {
 		t.Errorf("role = %v, want assistant", parsed["role"])
+	}
+}
+
+func TestCountTokensEndpoint(t *testing.T) {
+	h := NewHandler(nil, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	body := `{"model":"GPT-5.6 Sol","system":"system prompt","messages":[{"role":"user","content":"hello world"}],"tools":[{"name":"lookup","description":"lookup values","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var result map[string]int
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["input_tokens"] <= 0 {
+		t.Fatalf("input_tokens=%d", result["input_tokens"])
+	}
+}
+
+func TestEstimateInputTokensIncludesToolsAndImages(t *testing.T) {
+	base := &MessageRequest{Messages: []MessageParam{{Role: "user", Content: json.RawMessage(`"hello"`)}}}
+	baseCount := EstimateInputTokens(base)
+	withTools := &MessageRequest{Messages: base.Messages, Tools: []Tool{{Name: "f", Description: "long tool description", InputSchema: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)}}}
+	if EstimateInputTokens(withTools) <= baseCount {
+		t.Fatal("tools did not increase estimate")
+	}
+	withImage := &MessageRequest{Messages: []MessageParam{{Role: "user", Content: json.RawMessage(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + strings.Repeat("A", 10000) + `"}}]`)}}}
+	count := EstimateInputTokens(withImage)
+	if count < 1000 || count > 5000 {
+		t.Fatalf("image estimate=%d", count)
 	}
 }

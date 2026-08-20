@@ -528,6 +528,9 @@ func inferenceAuthMiddleware(next http.Handler, s *store.Store, bindHost string)
 }
 
 func isProxyInferencePath(path string) bool {
+	if path == "/v1/messages/count_tokens" {
+		return false
+	}
 	return strings.HasPrefix(path, "/v1/") || path == "/responses"
 }
 
