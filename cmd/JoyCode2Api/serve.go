@@ -110,7 +110,7 @@ var serveCmd = &cobra.Command{
 
 		// Per-request client resolution from database accounts
 		if s != nil {
-			transportManager := joycode.NewTransportManager(s.GetIntSetting("max_connections", 20))
+			transportManager := joycode.NewTransportManager(s.GetIntSetting("max_connections", 8))
 			client.SetTransport(transportManager)
 
 			// Background goroutine atomically swaps immutable transports when the
@@ -121,7 +121,7 @@ var serveCmd = &cobra.Command{
 				for {
 					select {
 					case <-ticker.C:
-						transportManager.Update(s.GetIntSetting("max_connections", 20))
+						transportManager.Update(s.GetIntSetting("max_connections", 8))
 					case <-stopCh:
 						transportManager.CloseIdleConnections()
 						return

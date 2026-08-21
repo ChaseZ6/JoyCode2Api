@@ -209,7 +209,7 @@ cursor   # 或 codex
 | | `default_max_tokens` | `8192` | 客户端未指定 `max_tokens` 时的默认值 |
 | **连接优化** | `max_retries` | `3` | 请求失败自动重试次数 |
 | | `request_timeout` | `120` | 与 JoyCode 后端通信超时（秒），低于 60 自动调到 60 |
-| | `max_connections` | `20` | 与后端最大并发 HTTP 连接数，10 秒内生效 |
+| | `max_connections` | `8` | 与后端最大并发 HTTP 连接数，10 秒内生效 |
 | **日志与监控** | `enable_request_logging` | `true` | 记录每个请求详情（模型、延迟、状态码），关闭后「数据概览」无数据 |
 | | `log_retention_days` | `30` | 请求日志保留天数，每小时自动清理，`0` 永久保留 |
 

@@ -27,7 +27,12 @@ func IsTimeoutError(err error) bool {
 		(strings.Contains(lower, "status") && strings.Contains(lower, "504") && strings.Contains(lower, "http")) ||
 		strings.Contains(lower, "http status 504") ||
 		strings.Contains(lower, "status code 504") ||
-		(strings.Contains(lower, "504") && strings.Contains(lower, "timeout"))
+		(strings.Contains(lower, "504") && strings.Contains(lower, "timeout")) ||
+		// Under overload the Color gateway may return its 京东 HTML error page
+		// with HTTP 200. It is not a JSON/application error and retrying it only
+		// adds another gateway timeout window.
+		strings.Contains(lower, "<!doctype html") ||
+		strings.Contains(lower, "<html")
 }
 
 // Truncate shortens s to at most maxLen bytes, appending "..." if it was

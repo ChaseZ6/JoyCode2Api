@@ -10,6 +10,7 @@ func TestIsTimeoutErrorRecognizesColorGateway504(t *testing.T) {
 		`upstream error: {"code":"COLOR_FORWARD_EXCEPTION","message":"HttpStatus=504"}`,
 		`invalid JSON response: 504 Gateway Time-out`,
 		`API error 504: gateway unavailable`,
+		`invalid JSON response (parse error: invalid character '<'): <!DOCTYPE html><html><head><title>京东</title></head></html>`,
 	} {
 		if !IsTimeoutError(errors.New(message)) {
 			t.Errorf("IsTimeoutError(%q) = false, want true", message)
