@@ -88,6 +88,10 @@ func (s *Server) handleNativeResponses(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNativeResponsesNonStream(w http.ResponseWriter, r *http.Request, client *joycode.Client, body map[string]interface{}) {
 	response, err := client.PostResponsesContext(r.Context(), body)
 	if err != nil {
+		if requestCanceled(r, err) {
+			slog.Info("native responses request canceled")
+			return
+		}
 		status := upstreamHTTPStatus(err)
 		copyRetryAfter(w, err)
 		errorType := "api_error"

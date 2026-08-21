@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -189,8 +190,16 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if requestContextDone(r, nil) {
+			reqLog(r).Info("non-stream request canceled before upstream retry")
+			return
+		}
 		jcResp, lastErr = client.PostContext(r.Context(), chatEndpoint, jcBody)
 		if lastErr != nil {
+			if requestContextDone(r, lastErr) {
+				reqLog(r).Info("non-stream request canceled; stopping retries", "attempt", attempt)
+				return
+			}
 			if isContextLimitError(lastErr.Error()) {
 				// An actual upstream context rejection overrides the local
 				// estimate: remove one more coherent section before retrying.
@@ -204,8 +213,17 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 				return
 			}
 			reqLog(r).Error("non-stream retry error", "attempt", attempt, "max", maxRetries, "error", lastErr)
+			// A Color gateway 504 already represents a complete upstream
+			// timeout. Retrying it would add another multi-minute wait and often
+			// race the client's own cancellation deadline.
+			if isTimeoutError(lastErr) {
+				break
+			}
 			if attempt < maxRetries {
-				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
+				if !waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond) {
+					reqLog(r).Info("non-stream request canceled while waiting to retry")
+					return
+				}
 			}
 			continue
 		}
@@ -213,6 +231,10 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 	}
 
 	if lastErr != nil {
+		if requestContextDone(r, lastErr) {
+			reqLog(r).Info("non-stream request canceled after upstream error")
+			return
+		}
 		errMsg := lastErr.Error()
 		if isContextLimitError(errMsg) {
 			writeAnthropicRequestError(w, "上下文长度超出模型限制。请压缩对话历史或开启新对话。原始错误: "+errMsg)
@@ -220,7 +242,7 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 		}
 		if isTimeoutError(lastErr) {
 			reqLog(r).Error("upstream timeout after retries", "error", lastErr)
-			writeAnthropicError(w, 504, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。原始错误: "+errMsg)
+			writeAnthropicError(w, 504, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。")
 			return
 		}
 		if strings.Contains(errMsg, "content_filter") || strings.Contains(errMsg, "SENSITIVE_CONTENT") {
@@ -357,6 +379,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	close(stopHeartbeat)
 	<-heartbeatDone
 	if err != nil {
+		if requestContextDone(r, err) {
+			reqLog(r).Info("stream request canceled before upstream response")
+			return
+		}
 		errMsg := err.Error()
 		if isContextLimitError(errMsg) {
 			reqLog(r).Warn("context limit exceeded (stream), cannot proceed even after progressive truncation")
@@ -365,7 +391,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		}
 		if isTimeoutError(err) {
 			reqLog(r).Error("upstream timeout (stream) after retries", "error", err)
-			writeStreamError(w, flusher, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。原始错误: "+errMsg)
+			writeStreamError(w, flusher, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。")
 			return
 		}
 		if strings.Contains(errMsg, "content_filter") || strings.Contains(errMsg, "SENSITIVE_CONTENT") {
@@ -578,7 +604,15 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	// a complete answer is ignored.
 	if !finishReasonSeen {
 		closeOpenBlock()
+		if requestContextDone(r, nil) {
+			reqLog(r).Info("stream request canceled before terminal event", "chunks", chunkCount)
+			return
+		}
 		if err := scanner.Err(); err != nil {
+			if requestContextDone(r, err) {
+				reqLog(r).Info("stream request canceled while reading upstream", "chunks", chunkCount)
+				return
+			}
 			reqLog(r).Error("stream ended abnormally before finish_reason", "error", err, "chunks", chunkCount)
 			store.SetRequestError(r, http.StatusBadGateway, "stream_read_error: "+err.Error())
 			writeStreamError(w, flusher, "读取上游流式响应失败，本次回复不完整，请重试。原始错误: "+err.Error())
@@ -631,8 +665,16 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		close(stopHB)
 		<-hbDone
+		if requestContextDone(r, err) {
+			reqLog(r).Info("native anthropic stream request canceled before upstream response")
+			return
+		}
 		reqLog(r).Error("native anthropic stream failed after retries", "error", err)
-		writeStreamError(w, flusher, err.Error())
+		if isTimeoutError(err) {
+			writeStreamError(w, flusher, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。")
+		} else {
+			writeStreamError(w, flusher, err.Error())
+		}
 		return
 	}
 
@@ -651,8 +693,16 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 			close(stopHB)
 			<-hbDone
 			if err2 != nil {
+				if requestContextDone(r, err2) {
+					reqLog(r).Info("native anthropic stream request canceled before web-search retry")
+					return
+				}
 				reqLog(r).Error("web_search interceptor: round 2 failed", "error", err2)
-				writeStreamError(w, flusher, err2.Error())
+				if isTimeoutError(err2) {
+					writeStreamError(w, flusher, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。")
+				} else {
+					writeStreamError(w, flusher, err2.Error())
+				}
 				return
 			}
 			reqLog(r).Info("web_search interceptor: piping round 2 response")
@@ -667,8 +717,16 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 	<-hbDone
 
 	if collectErr != nil {
+		if requestContextDone(r, collectErr) {
+			reqLog(r).Info("native anthropic stream request canceled while reading upstream")
+			return
+		}
 		reqLog(r).Error("native anthropic stream collect error", "error", collectErr)
 		writeStreamError(w, flusher, "读取上游流式响应失败: "+collectErr.Error())
+		return
+	}
+	if requestContextDone(r, nil) {
+		reqLog(r).Info("native anthropic stream request canceled before forwarding response")
 		return
 	}
 
@@ -745,6 +803,10 @@ func (h *Handler) pipeNativeAnthropicStream(w http.ResponseWriter, r *http.Reque
 	pendingEvent := ""
 	sawTerminal := false
 	for scanner.Scan() {
+		if requestContextDone(r, nil) {
+			reqLog(r).Info("native anthropic stream request canceled while forwarding upstream")
+			return
+		}
 		raw := scanner.Text()
 		// Strip ALL leading "data: " prefixes (upstream double-wraps each line).
 		line := raw
@@ -787,6 +849,10 @@ func (h *Handler) pipeNativeAnthropicStream(w http.ResponseWriter, r *http.Reque
 	}
 	if !sawTerminal {
 		if err := scanner.Err(); err != nil {
+			if requestContextDone(r, err) {
+				reqLog(r).Info("web_search round2 request canceled while reading upstream")
+				return
+			}
 			reqLog(r).Error("web_search round2 stream ended abnormally", "error", err)
 			writeStreamError(w, flusher, "读取上游流式响应失败，本次回复不完整，请重试。原始错误: "+err.Error())
 		} else {
@@ -808,8 +874,16 @@ func (h *Handler) handleNativeAnthropicNonStream(w http.ResponseWriter, r *http.
 
 	resp, err := h.connectNativeAnthropicStreamWithRetry(r, body, client)
 	if err != nil {
+		if requestContextDone(r, err) {
+			reqLog(r).Info("native anthropic non-stream request canceled before upstream response")
+			return
+		}
 		reqLog(r).Error("native anthropic non-stream failed after retries", "error", err)
-		writeAnthropicError(w, 500, err.Error())
+		if isTimeoutError(err) {
+			writeAnthropicError(w, http.StatusGatewayTimeout, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。")
+		} else {
+			writeAnthropicError(w, http.StatusBadGateway, "上游 Claude 接口调用失败，请稍后重试。")
+		}
 		return
 	}
 
@@ -817,8 +891,16 @@ func (h *Handler) handleNativeAnthropicNonStream(w http.ResponseWriter, r *http.
 	round1, collectErr := collectNativeAnthropicStream(resp.Body)
 	resp.Body.Close()
 	if collectErr != nil {
+		if requestContextDone(r, collectErr) {
+			reqLog(r).Info("native anthropic non-stream request canceled while reading upstream")
+			return
+		}
 		reqLog(r).Error("native anthropic non-stream collect error", "error", collectErr)
-		writeAnthropicError(w, 500, "读取上游响应失败: "+collectErr.Error())
+		writeAnthropicError(w, http.StatusBadGateway, "读取上游 Claude 响应失败，请稍后重试。")
+		return
+	}
+	if requestContextDone(r, nil) {
+		reqLog(r).Info("native anthropic non-stream request canceled after upstream response")
 		return
 	}
 
@@ -829,7 +911,11 @@ func (h *Handler) handleNativeAnthropicNonStream(w http.ResponseWriter, r *http.
 			p = strings.TrimSpace(strings.TrimPrefix(p, "data: "))
 		}
 		if p != "" && p != "[DONE]" && strings.HasPrefix(p, "{") && isUpstreamError(p) {
-			writeAnthropicError(w, 500, p)
+			if isTimeoutError(fmt.Errorf("%s", p)) {
+				writeAnthropicError(w, http.StatusGatewayTimeout, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。")
+			} else {
+				writeAnthropicError(w, http.StatusBadGateway, "上游 Claude 接口返回错误，请稍后重试。")
+			}
 			return
 		}
 	}
@@ -844,15 +930,27 @@ func (h *Handler) handleNativeAnthropicNonStream(w http.ResponseWriter, r *http.
 
 			resp2, err2 := h.connectNativeAnthropicStreamWithRetry(r, body2, client)
 			if err2 != nil {
+				if requestContextDone(r, err2) {
+					reqLog(r).Info("native anthropic non-stream request canceled before web-search retry")
+					return
+				}
 				reqLog(r).Error("web_search interceptor (non-stream): round 2 failed", "error", err2)
-				writeAnthropicError(w, 500, err2.Error())
+				if isTimeoutError(err2) {
+					writeAnthropicError(w, http.StatusGatewayTimeout, "上游服务响应超时，请稍后重试。如果问题持续，请尝试减少上下文长度或开启新对话。")
+				} else {
+					writeAnthropicError(w, http.StatusBadGateway, "上游 Claude 接口调用失败，请稍后重试。")
+				}
 				return
 			}
 			round2, collectErr2 := collectNativeAnthropicStream(resp2.Body)
 			resp2.Body.Close()
 			if collectErr2 != nil {
+				if requestContextDone(r, collectErr2) {
+					reqLog(r).Info("native anthropic non-stream request canceled while reading web-search response")
+					return
+				}
 				reqLog(r).Error("web_search interceptor (non-stream): collect round 2 error", "error", collectErr2)
-				writeAnthropicError(w, 500, "读取上游响应失败: "+collectErr2.Error())
+				writeAnthropicError(w, http.StatusBadGateway, "读取上游 Claude 响应失败，请稍后重试。")
 				return
 			}
 			content := round2.Content
@@ -905,12 +1003,23 @@ func (h *Handler) connectNativeAnthropicStreamWithRetry(r *http.Request, body ma
 	}
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if requestContextDone(r, nil) {
+			return nil, r.Context().Err()
+		}
 		resp, err := client.PostAnthropicStreamContext(r.Context(), anthropicEndpoint, body)
 		if err != nil {
 			lastErr = err
+			if requestContextDone(r, err) {
+				return nil, err
+			}
 			reqLog(r).Error("native anthropic stream connect error", "attempt", attempt, "max", maxRetries, "error", err)
 			if attempt < maxRetries {
-				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
+				if isTimeoutError(err) {
+					return nil, err
+				}
+				if !waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond) {
+					return nil, r.Context().Err()
+				}
 			}
 			continue
 		}
@@ -919,21 +1028,34 @@ func (h *Handler) connectNativeAnthropicStreamWithRetry(r *http.Request, body ma
 		if err != nil {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("read first line: %w", err)
+			if requestContextDone(r, lastErr) {
+				return nil, lastErr
+			}
 			if attempt < maxRetries {
-				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
+				if !waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond) {
+					return nil, r.Context().Err()
+				}
 			}
 			continue
 		}
 		if err := nativeAnthropicLineError(firstLine); err != nil {
 			resp.Body.Close()
 			lastErr = err
+			if isTimeoutError(lastErr) {
+				return nil, lastErr
+			}
 			if attempt < maxRetries {
-				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
+				if !waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond) {
+					return nil, r.Context().Err()
+				}
 			}
 			continue
 		}
 		resp.Body = &prependReader{first: []byte(firstLine), source: br, body: resp.Body}
 		return resp, nil
+	}
+	if requestContextDone(r, lastErr) {
+		return nil, lastErr
 	}
 	return nil, lastErr
 }
@@ -1014,12 +1136,23 @@ func (h *Handler) connectStreamWithRetry(r *http.Request, jcBody map[string]inte
 	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if requestContextDone(r, nil) {
+			return nil, r.Context().Err()
+		}
 		resp, err := client.PostStreamContext(r.Context(), chatEndpoint, jcBody)
 		if err != nil {
 			lastErr = err
+			if requestContextDone(r, err) {
+				return nil, err
+			}
 			reqLog(r).Error("stream connect error", "attempt", attempt, "max", maxRetries, "error", err)
 			if attempt < maxRetries {
-				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
+				if isTimeoutError(err) {
+					return nil, err
+				}
+				if !waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond) {
+					return nil, r.Context().Err()
+				}
 			}
 			continue
 		}
@@ -1029,9 +1162,14 @@ func (h *Handler) connectStreamWithRetry(r *http.Request, jcBody map[string]inte
 		if err != nil {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("read first line: %w", err)
+			if requestContextDone(r, lastErr) {
+				return nil, lastErr
+			}
 			reqLog(r).Error("stream read first line", "attempt", attempt, "max", maxRetries, "error", lastErr)
 			if attempt < maxRetries {
-				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
+				if !waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond) {
+					return nil, r.Context().Err()
+				}
 			}
 			continue
 		}
@@ -1045,12 +1183,17 @@ func (h *Handler) connectStreamWithRetry(r *http.Request, jcBody map[string]inte
 			if isContextLimitError(dataContent) {
 				return nil, lastErr
 			}
+			if isTimeoutError(lastErr) {
+				return nil, lastErr
+			}
 			// SENSITIVE_CONTENT errors are deterministic — retrying is pointless
 			if strings.Contains(dataContent, "SENSITIVE_CONTENT") {
 				return nil, lastErr
 			}
 			if attempt < maxRetries {
-				waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond)
+				if !waitForRetry(r.Context(), time.Duration(attempt)*500*time.Millisecond) {
+					return nil, r.Context().Err()
+				}
 			}
 			continue
 		}
@@ -1088,12 +1231,26 @@ func (h *Handler) connectStreamWithRetry(r *http.Request, jcBody map[string]inte
 		reqLog(r).Info("stream connected", "attempt", attempt)
 		return resp, nil
 	}
+	if requestContextDone(r, lastErr) {
+		return nil, lastErr
+	}
 	return nil, fmt.Errorf("stream failed after %d attempts: %w", maxRetries, lastErr)
 }
 
 // isTimeoutError checks if the error is caused by an upstream timeout.
 func isTimeoutError(err error) bool {
 	return common.IsTimeoutError(err)
+}
+
+// requestContextDone distinguishes the caller closing the request from an
+// upstream failure. Once the client has gone away, retrying or writing an
+// error response only creates misleading logs and wastes another upstream
+// request.
+func requestContextDone(r *http.Request, err error) bool {
+	if r != nil && r.Context().Err() != nil {
+		return true
+	}
+	return err != nil && errors.Is(err, context.Canceled)
 }
 
 // isContextLimitError checks if the upstream error indicates context length exceeded.

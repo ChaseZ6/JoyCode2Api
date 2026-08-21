@@ -198,6 +198,9 @@ func connectUpstreamStream(
 			writeSSEHeartbeat(w, flusher)
 		case outcome := <-result:
 			if outcome.Err != nil {
+				if requestCanceled(r, outcome.Err) {
+					return nil, committed
+				}
 				if committed {
 					writeSSEError(w, flusher, outcome.Err.Error(), "api_error", "upstream_error")
 				} else {

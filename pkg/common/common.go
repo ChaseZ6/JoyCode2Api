@@ -15,7 +15,19 @@ func IsTimeoutError(err error) bool {
 	return strings.Contains(lower, "context deadline exceeded") ||
 		strings.Contains(lower, "client.timeout exceeded") ||
 		strings.Contains(lower, "deadline exceeded") ||
-		strings.Contains(lower, "i/o timeout")
+		strings.Contains(lower, "i/o timeout") ||
+		// The Color gateway sometimes returns a 504 envelope with HTTP 200,
+		// which reaches callers as a JSON parse/business error rather than an
+		// HTTPError. Match both the gateway marker and common 504 spellings.
+		strings.Contains(lower, "color_forward_exception") ||
+		strings.Contains(lower, "gateway timeout") ||
+		strings.Contains(lower, "gateway time-out") ||
+		strings.Contains(lower, "api error 504") ||
+		(strings.Contains(lower, "httpstatus") && strings.Contains(lower, "504")) ||
+		(strings.Contains(lower, "status") && strings.Contains(lower, "504") && strings.Contains(lower, "http")) ||
+		strings.Contains(lower, "http status 504") ||
+		strings.Contains(lower, "status code 504") ||
+		(strings.Contains(lower, "504") && strings.Contains(lower, "timeout"))
 }
 
 // Truncate shortens s to at most maxLen bytes, appending "..." if it was

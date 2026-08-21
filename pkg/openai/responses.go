@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -509,6 +510,10 @@ func (s *Server) handleResponsesNonStream(w http.ResponseWriter, r *http.Request
 	}
 	raw, err := client.PostResponsesContext(r.Context(), body)
 	if err != nil {
+		if requestCanceled(r, err) {
+			slog.Info("responses non-stream request canceled")
+			return
+		}
 		status := upstreamHTTPStatus(err)
 		copyRetryAfter(w, err)
 		errorType := "api_error"

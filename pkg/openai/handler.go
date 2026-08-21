@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -95,6 +96,16 @@ func copyRetryAfter(w http.ResponseWriter, err error) {
 			w.Header().Set("Retry-After", value)
 		}
 	}
+}
+
+// requestCanceled reports a caller disconnect rather than an upstream
+// failure. Handlers must stop quietly in this case because the response can no
+// longer be delivered to the client.
+func requestCanceled(r *http.Request, err error) bool {
+	if r != nil && r.Context().Err() != nil {
+		return true
+	}
+	return err != nil && errors.Is(err, context.Canceled)
 }
 
 func upstreamHTTPStatus(err error) int {

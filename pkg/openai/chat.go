@@ -76,6 +76,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNonStreamChat(w http.ResponseWriter, r *http.Request, client *joycode.Client, jcBody map[string]interface{}, model string) {
 	resp, err := client.PostContext(r.Context(), "/api/saas/openai/v1/chat/completions", jcBody)
 	if err != nil {
+		if requestCanceled(r, err) {
+			slog.Info("chat non-stream request canceled")
+			return
+		}
 		slog.Error("chat non-stream upstream error", "model", model, "error", err)
 		status := upstreamHTTPStatus(err)
 		copyRetryAfter(w, err)

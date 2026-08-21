@@ -29,9 +29,16 @@ func (s *Server) handleResponsesViaChatNonStream(w http.ResponseWriter, r *http.
 	var resp map[string]interface{}
 	var err error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if requestCanceled(r, nil) {
+			return
+		}
 		resp, err = client.PostContext(r.Context(), "/api/saas/openai/v1/chat/completions", chatBody)
 		if err == nil {
 			break
+		}
+		if requestCanceled(r, err) {
+			slog.Info("responses-to-chat request canceled", "attempt", attempt)
+			return
 		}
 		// Deterministic client-side failures (bad request, content filter) will
 		// fail identically on retry — only transient errors are worth another
@@ -39,16 +46,24 @@ func (s *Server) handleResponsesViaChatNonStream(w http.ResponseWriter, r *http.
 		if status := upstreamHTTPStatus(err); status == http.StatusBadRequest {
 			break
 		}
+		// A gateway timeout has already consumed the upstream wait budget; a
+		// second long request only increases the chance that the caller cancels.
+		if isTimeoutError(err.Error()) {
+			break
+		}
 		slog.Error("responses->chat non-stream upstream error", "model", displayName, "attempt", attempt, "max", maxRetries, "error", err)
 		if attempt < maxRetries {
 			select {
 			case <-r.Context().Done():
-				break
+				return
 			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
 			}
 		}
 	}
 	if err != nil {
+		if requestCanceled(r, err) {
+			return
+		}
 		status := upstreamHTTPStatus(err)
 		copyRetryAfter(w, err)
 		errorType := "api_error"
