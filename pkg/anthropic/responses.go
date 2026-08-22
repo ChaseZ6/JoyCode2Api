@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
@@ -486,7 +487,32 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(200)
 
+	// Heartbeat while waiting for the upstream to connect. The Responses
+	// upstream can take tens of seconds (occasionally minutes) to return its
+	// first byte; without keepalives, clients with a short idle-timeout
+	// (notably Codex) assume the connection is dead and reconnect. SSE comment
+	// lines are ignored by event parsers, so they cannot corrupt the stream.
+	// Mirrors the heartbeat handleStream already runs for the chat path.
+	stopHeartbeat := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		defer close(heartbeatDone)
+		for {
+			select {
+			case <-stopHeartbeat:
+				return
+			case <-ticker.C:
+				fmt.Fprint(w, ": keepalive\n\n")
+				flusher.Flush()
+			}
+		}
+	}()
+
 	resp, err := client.PostResponsesStreamContext(r.Context(), body)
+	close(stopHeartbeat)
+	<-heartbeatDone
 	if err != nil {
 		reqLog(r).Error("responses stream connect failed", "model", model.APIName(), "error", err)
 		writeStreamError(w, flusher, "上游 Responses 接口调用失败: "+err.Error())

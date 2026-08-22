@@ -591,7 +591,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 				continue
 			}
 			trimmedLine := strings.TrimSpace(line)
-			if trimmedLine != "" && trimmedLine != "[DONE]" {
+			// Strip the "data: " prefix before comparing so the terminal
+			// "data: [DONE]" marker is not misreported as an unparseable line.
+			payload := strings.TrimSpace(strings.TrimPrefix(trimmedLine, "data:"))
+			if payload != "" && payload != "[DONE]" {
 				parseFailures++
 				// Rate-limited: log the first failure and then every 500.
 				if parseFailures == 1 || parseFailures%500 == 0 {

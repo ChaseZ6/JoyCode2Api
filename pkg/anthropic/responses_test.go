@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
@@ -426,6 +427,57 @@ func TestResponsesHandlerStream_FailedEventSurfacesError(t *testing.T) {
 	}
 	if outcome.StatusCode != http.StatusBadGateway || !strings.Contains(outcome.Error, "upstream_error") {
 		t.Errorf("outcome = %+v", outcome)
+	}
+}
+
+// TestResponsesHandlerStream_HeartbeatWhileWaiting: while the proxy blocks on
+// the slow upstream connect, it must emit periodic keepalive comments so
+// clients with a short idle timeout (Codex) do not treat the connection as
+// dead and reconnect. The test holds the upstream response for >5s (past one
+// heartbeat tick) and asserts the final stream contains a keepalive comment
+// that could only have been written during the wait.
+func TestResponsesHandlerStream_HeartbeatWhileWaiting(t *testing.T) {
+	joycode.DefaultRegistry.Seed([]joycode.ModelInfo{solModel()})
+	t.Cleanup(func() { joycode.DefaultRegistry.Seed(joycode.StaticModels()) })
+
+	release := make(chan struct{})
+	client := joycode.NewClient("pt-test", "user-test")
+	client.SetHTTPClient(&http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+		// Hold the upstream response until released, simulating a slow first
+		// byte. Meanwhile the handler should be emitting keepalives.
+		<-release
+		sse := `data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n" +
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}` + "\n\n"
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sse))}, nil
+	})})
+	handler := NewHandler(client, nil)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"GPT-5.6 Sol","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = store.InitTokenUsage(req)
+	req = store.InitRequestOutcome(req)
+	rec := httptest.NewRecorder()
+
+	// Let the handler run while we hold the upstream for longer than one tick.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		mux.ServeHTTP(rec, req)
+	}()
+	time.Sleep(5600 * time.Millisecond)
+	close(release)
+	<-done
+
+	out := rec.Body.String()
+	// A keepalive written during the 5.6s wait proves the heartbeat ran; the
+	// stream must also still complete normally afterwards.
+	if !strings.Contains(out, ": keepalive") {
+		t.Errorf("expected keepalive comments during slow upstream connect:\n%s", out)
+	}
+	if !strings.Contains(out, "event: message_start") {
+		t.Errorf("stream must still complete with message_start after connect:\n%s", out)
 	}
 }
 
