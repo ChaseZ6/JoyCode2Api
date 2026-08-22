@@ -10,6 +10,7 @@ import {
   ClockCircleOutlined, GlobalOutlined, FireOutlined,
   DeleteOutlined, QuestionCircleOutlined, InfoCircleOutlined,
   CloseCircleOutlined, SwapOutlined, CopyOutlined,
+  DownOutlined, UpOutlined,
 } from '@ant-design/icons';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip,
@@ -122,6 +123,7 @@ const AccountDetail: React.FC = () => {
   const [logLoading, setLogLoading] = useState(false);
   const logRequestSeq = useRef(0);
   const [activeSessions, setActiveSessions] = useState(0);
+  const [statsCollapsed, setStatsCollapsed] = useState(true);
 
   const decodedKey = userId ? decodeURIComponent(userId) : '';
 
@@ -471,8 +473,41 @@ const AccountDetail: React.FC = () => {
         </div>
       </Card>
 
-      {/* Stats panels */}
+      {/* Stats collapse header */}
       {stats && (
+        <Card
+          size="small"
+          style={{ marginBottom: statsCollapsed ? 20 : 16, cursor: 'pointer' }}
+          onClick={() => setStatsCollapsed(!statsCollapsed)}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
+            <span className="jc-section-title" style={{ margin: 0 }}>
+              <FireOutlined />统计信息
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>今日 Token:</Typography.Text>
+              <Typography.Text strong style={{ fontSize: 15, color: CHART_COLORS.secondary }}>
+                {fmtTokens(stats.total_input_tokens + stats.total_output_tokens)}
+              </Typography.Text>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>累计 Token:</Typography.Text>
+              <Typography.Text strong style={{ fontSize: 15 }}>
+                {fmtTokens((stats.all_time?.total_input_tokens ?? 0) + (stats.all_time?.total_output_tokens ?? 0))}
+              </Typography.Text>
+            </div>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {statsCollapsed ? '展开详情' : '收起详情'}
+              </Typography.Text>
+              {statsCollapsed ? <DownOutlined style={{ fontSize: 12, color: '#94A3B8' }} /> : <UpOutlined style={{ fontSize: 12, color: '#94A3B8' }} />}
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Stats panels */}
+      {stats && !statsCollapsed && (
         <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
           <Col xs={24} md={12}>
             <Card
@@ -593,7 +628,7 @@ const AccountDetail: React.FC = () => {
       )}
 
       {/* Hourly trend charts */}
-      {stats && stats.hourly && stats.hourly.length > 0 && (() => {
+      {stats && !statsCollapsed && stats.hourly && stats.hourly.length > 0 && (() => {
         // Build hourly chart with date-aware keys to avoid cross-day merging
         const hMap = new Map<string, { count: number; input_tokens: number; output_tokens: number; errors: number }>();
         for (const h of stats.hourly) {
@@ -668,7 +703,7 @@ const AccountDetail: React.FC = () => {
       })()}
 
       {/* Charts row */}
-      {stats && (stats.by_model.length > 0 || endpointData.length > 0) && (
+      {stats && !statsCollapsed && (stats.by_model.length > 0 || endpointData.length > 0) && (
         <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
           {stats.by_model.length > 0 && (
             <Col xs={24} lg={14}>
