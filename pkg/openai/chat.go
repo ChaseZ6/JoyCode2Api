@@ -128,19 +128,33 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 	defer heartbeat.Stop()
 	var inTk, outTk int
 	sawFinish := false
+	// After [DONE] the upstream may send a trailing usage-only chunk (when
+	// stream_options.include_usage is set) before EOF. Wait a short grace
+	// window for it before forwarding [DONE] to the client, so token stats and
+	// the forwarded usage are not lost.
+	const doneGracePeriod = 3 * time.Second
+	var doneTimer *time.Timer
+	var doneTimerC <-chan time.Time
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-heartbeat.C:
 			writeSSEHeartbeat(w, flusher)
+		case <-doneTimerC:
+			// Grace window after [DONE] expired without a usage chunk.
+			if inTk > 0 || outTk > 0 {
+				store.SetTokenUsage(r, inTk, outTk)
+			}
+			writeSSEDone(w, flusher)
+			return
 		case item, open := <-reads:
 			if !open {
-				if sawFinish {
-					writeSSEDone(w, flusher)
+				if sawFinish || doneTimerC != nil {
 					if inTk > 0 || outTk > 0 {
 						store.SetTokenUsage(r, inTk, outTk)
 					}
+					writeSSEDone(w, flusher)
 					return
 				}
 				writeSSEError(w, flusher, "upstream stream ended before finish_reason", "api_error", "stream_truncated")
@@ -151,11 +165,13 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 				return
 			}
 			if item.Done {
-				if inTk > 0 || outTk > 0 {
-					store.SetTokenUsage(r, inTk, outTk)
+				// Don't forward [DONE] yet: wait briefly for a trailing usage
+				// chunk. EOF (!open above) or the timer finalizes.
+				if doneTimerC == nil {
+					doneTimer = time.NewTimer(doneGracePeriod)
+					doneTimerC = doneTimer.C
 				}
-				writeSSEDone(w, flusher)
-				return
+				continue
 			}
 			if item.BusinessErr != nil {
 				writeSSEError(w, flusher, item.BusinessErr.Error(), "api_error", "upstream_error")
@@ -166,6 +182,15 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 			}
 			if item.InputTokens > 0 || item.OutputTokens > 0 {
 				inTk, outTk = item.InputTokens, item.OutputTokens
+				// Trailing usage chunk after [DONE]: record and finalize.
+				if doneTimerC != nil {
+					doneTimer.Stop()
+					if inTk > 0 || outTk > 0 {
+						store.SetTokenUsage(r, inTk, outTk)
+					}
+					writeSSEDone(w, flusher)
+					return
+				}
 			}
 			fmt.Fprintf(w, "data: %s\n\n", item.Data)
 			flusher.Flush()

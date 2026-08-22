@@ -269,6 +269,14 @@ func (s *Server) handleResponsesViaChatStream(w http.ResponseWriter, r *http.Req
 				}
 				continue
 			}
+			// A post-[DONE] chunk may carry content/tool_calls AND usage in one
+			// final snapshot. Consume the content first; finalizing before
+			// consumeChunk would drop the snapshot from response.completed.
+			if err := state.consumeChunk(item.Data, item.FinishReason); err != nil {
+				state.fail(err.Error(), "upstream_protocol_error")
+				writeSSEDone(w, flusher)
+				return
+			}
 			if item.InputTokens > 0 || item.OutputTokens > 0 {
 				state.inputTokens, state.outputTokens = item.InputTokens, item.OutputTokens
 				// Trailing usage chunk after [DONE]: finalize now.
@@ -278,11 +286,6 @@ func (s *Server) handleResponsesViaChatStream(w http.ResponseWriter, r *http.Req
 					writeSSEDone(w, flusher)
 					return
 				}
-			}
-			if err := state.consumeChunk(item.Data, item.FinishReason); err != nil {
-				state.fail(err.Error(), "upstream_protocol_error")
-				writeSSEDone(w, flusher)
-				return
 			}
 		}
 	}

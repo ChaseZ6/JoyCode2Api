@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -355,6 +356,61 @@ func TestResponsesStream_TextThenToolUsesDistinctIndices(t *testing.T) {
 	})
 	if !strings.Contains(out, `"index":0`) || !strings.Contains(out, `"index":1`) {
 		t.Errorf("expected separate block indices:\n%s", out)
+	}
+}
+
+// TestResponsesStream_TextToolTextBlockOrder: text before AND after a tool call
+// (the GPT-5 "preamble → tool → follow-up" pattern). Every started block must
+// be stopped before the next starts, and the post-tool text must open a NEW
+// block (not reuse the pre-tool one, which is already closed).
+func TestResponsesStream_TextToolTextBlockOrder(t *testing.T) {
+	out := runResponsesStream([]string{
+		`{"type":"response.output_text.delta","delta":"let me check"}`,
+		`{"type":"response.output_item.added","item":{"type":"function_call","name":"f","call_id":"c1"}}`,
+		`{"type":"response.function_call_arguments.delta","delta":"{}"}`,
+		`{"type":"response.output_item.done","item":{"type":"function_call","call_id":"c1"}}`,
+		`{"type":"response.output_text.delta","delta":"done!"}`,
+		`{"type":"response.completed","response":{}}`,
+	})
+
+	// Extract every content_block event with its index, in order.
+	type blk struct {
+		event string
+		index string
+	}
+	var seq []blk
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var m map[string]interface{}
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &m) != nil {
+			continue
+		}
+		typ, _ := m["type"].(string)
+		if typ != "content_block_start" && typ != "content_block_stop" {
+			continue
+		}
+		idx := ""
+		if f, ok := m["index"].(float64); ok {
+			idx = fmt.Sprintf("%d", int(f))
+		}
+		seq = append(seq, blk{typ, idx})
+	}
+
+	// Expected: start0, stop0 (text), start1, stop1 (tool), start2, stop2 (text).
+	want := []blk{
+		{"content_block_start", "0"}, {"content_block_stop", "0"},
+		{"content_block_start", "1"}, {"content_block_stop", "1"},
+		{"content_block_start", "2"}, {"content_block_stop", "2"},
+	}
+	if len(seq) != len(want) {
+		t.Fatalf("block sequence = %v, want %v\n%s", seq, want, out)
+	}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Fatalf("block sequence = %v, want %v\n%s", seq, want, out)
+		}
 	}
 }
 

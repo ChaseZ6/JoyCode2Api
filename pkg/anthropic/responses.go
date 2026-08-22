@@ -659,6 +659,11 @@ func (s *responsesStreamState) handleEvent(ev *responsesStreamEvent) {
 		if ev.Item.Type != "function_call" {
 			return
 		}
+		// Anthropic requires blocks to be strictly sequential: a started block
+		// must be stopped before the next begins. If a text block is still open
+		// (model emitted text before the tool call — very common), close it
+		// first so the tool block does not interleave with it.
+		s.closeText()
 		itemID := ev.Item.ID
 		callID := ev.Item.CallID
 		if callID == "" {

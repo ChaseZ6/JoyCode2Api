@@ -172,6 +172,62 @@ func TestChatFallbackStream_TrailingUsageChunk(t *testing.T) {
 	}
 }
 
+// TestChatFallbackStream_PostDoneSnapshotNotDropped: a chat gateway may send a
+// final "content snapshot + usage" chunk AFTER [DONE]. If the usage triggers
+// complete() before the snapshot is consumed, response.completed's output is
+// empty and Codex clears the whole turn.
+func TestChatFallbackStream_PostDoneSnapshotNotDropped(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{kimiModel()})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		chunks := []string{
+			`{"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+			`{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		}
+		for _, c := range chunks {
+			io.WriteString(w, "data: "+c+"\n\n")
+			flusher.Flush()
+		}
+		io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		// Trailing snapshot: content + usage in one chunk, after [DONE].
+		io.WriteString(w, `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4}}`+"\n\n")
+		flusher.Flush()
+	}))
+	defer backend.Close()
+
+	server := NewServer(newMockClient(backend), nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"Kimi-K3","input":"hello","stream":true}`))
+	req = store.InitTokenUsage(req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var completed map[string]interface{}
+	for _, ev := range collectSSE(rec.Body.String()) {
+		if ev["type"] == "response.completed" {
+			completed, _ = ev["response"].(map[string]interface{})
+		}
+	}
+	if completed == nil {
+		t.Fatalf("no response.completed in stream:\n%s", rec.Body.String())
+	}
+	output, _ := completed["output"].([]interface{})
+	if len(output) == 0 {
+		t.Fatalf("response.completed output is empty — post-[DONE] snapshot was dropped:\n%s", rec.Body.String())
+	}
+	usage, _ := completed["usage"].(map[string]interface{})
+	if out, _ := usage["output_tokens"].(float64); out != 4 {
+		t.Errorf("completed output_tokens = %v", usage["output_tokens"])
+	}
+}
+
 // TestTranslateResponsesReqToChat_MergesAssistantTurn covers the
 // multi-round tool loop: Codex replays the previous turn as separate items
 // (assistant message, function_call, function_call_output). The chat
