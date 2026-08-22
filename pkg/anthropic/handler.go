@@ -320,6 +320,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 
 	jcBody = TranslateRequest(req, store.GetAccountDefaultModel(r), systemDefault)
 	jcBody["stream"] = true
+	// Ask the upstream for a trailing usage chunk. chat-completions streams omit
+	// usage by default, so without this the token stats are never populated and
+	// the dashboard shows "-".
+	jcBody["stream_options"] = map[string]interface{}{"include_usage": true}
 
 	// Commit SSE headers + message_start early so we can send heartbeat ping
 	// events while waiting for the upstream to respond. The JoyCode upstream
@@ -371,6 +375,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		}
 		jcBody = TranslateRequest(req, store.GetAccountDefaultModel(r), systemDefault)
 		jcBody["stream"] = true
+		jcBody["stream_options"] = map[string]interface{}{"include_usage": true}
 		resp, err = h.connectStreamWithRetry(r, jcBody, client)
 	}
 	close(stopHeartbeat)
