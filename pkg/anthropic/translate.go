@@ -370,8 +370,28 @@ func buildMessages(req *MessageRequest) []map[string]interface{} {
 		}
 	}
 
+	// Collect all tool_result IDs from user messages so we can detect tool_use
+	// blocks that have no result — "dangling" calls left when a truncation
+	// boundary removed the tool_result, or when the user interrupted between
+	// the tool call and its result. OpenAI requires every tool_call to have a
+	// matching tool message, so we downgrade those to text rather than emit a
+	// protocol-incomplete sequence.
+	toolResultIDs := map[string]bool{}
 	for _, m := range req.Messages {
-		for _, converted := range convertMessage(m.Role, m.Content, toolUseIDs) {
+		if m.Role == "user" {
+			var blocks []contentBlock
+			if json.Unmarshal(m.Content, &blocks) == nil {
+				for _, b := range blocks {
+					if b.Type == "tool_result" && b.ToolUseID != "" {
+						toolResultIDs[b.ToolUseID] = true
+					}
+				}
+			}
+		}
+	}
+
+	for _, m := range req.Messages {
+		for _, converted := range convertMessage(m.Role, m.Content, toolUseIDs, toolResultIDs) {
 			msgs = append(msgs, converted)
 		}
 	}
@@ -379,7 +399,7 @@ func buildMessages(req *MessageRequest) []map[string]interface{} {
 }
 
 // convertMessage converts a single Anthropic message to one or more OpenAI format messages.
-func convertMessage(role string, raw json.RawMessage, toolUseIDs map[string]bool) []map[string]interface{} {
+func convertMessage(role string, raw json.RawMessage, toolUseIDs map[string]bool, toolResultIDs map[string]bool) []map[string]interface{} {
 	// Try simple string content first
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
@@ -394,7 +414,7 @@ func convertMessage(role string, raw json.RawMessage, toolUseIDs map[string]bool
 
 	switch role {
 	case "assistant":
-		return []map[string]interface{}{convertAssistantBlocks(blocks)}
+		return []map[string]interface{}{convertAssistantBlocks(blocks, toolResultIDs)}
 	case "user":
 		return convertUserBlocks(blocks, toolUseIDs)
 	default:
@@ -403,7 +423,7 @@ func convertMessage(role string, raw json.RawMessage, toolUseIDs map[string]bool
 }
 
 // convertAssistantBlocks handles assistant messages with tool_use blocks.
-func convertAssistantBlocks(blocks []contentBlock) map[string]interface{} {
+func convertAssistantBlocks(blocks []contentBlock, toolResultIDs map[string]bool) map[string]interface{} {
 	textParts := []string{}
 	toolCalls := []interface{}{}
 
@@ -419,6 +439,13 @@ func convertAssistantBlocks(blocks []contentBlock) map[string]interface{} {
 			id := b.ID
 			if id == "" {
 				id = "call_" + newID()
+			}
+			// A tool_use with no matching tool_result anywhere in the retained
+			// conversation would produce a tool_call with no tool response.
+			// Downgrade it to a text note so the upstream sees a valid sequence.
+			if !toolResultIDs[id] {
+				textParts = append(textParts, "[previous tool call: "+b.Name+"("+args+") — result omitted]")
+				continue
 			}
 			toolCalls = append(toolCalls, map[string]interface{}{
 				"id":   id,

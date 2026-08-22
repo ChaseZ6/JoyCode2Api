@@ -122,6 +122,77 @@ func TestTranslateRequestWithSystem(t *testing.T) {
 	}
 }
 
+// TestBuildMessages_DanglingToolUseDowngraded: a tool_use with no matching
+// tool_result anywhere in the retained conversation would produce an assistant
+// message with tool_calls but no tool response — a protocol violation OpenAI
+// rejects. Such calls must be downgraded to a text note instead.
+func TestBuildMessages_DanglingToolUseDowngraded(t *testing.T) {
+	req := &MessageRequest{
+		Model:     "claude-sonnet-4",
+		MaxTokens: 1024,
+		Messages: []MessageParam{
+			{Role: "user", Content: json.RawMessage(`"start"`)},
+			// Assistant calls a tool but the user interrupted before the result.
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_a3","name":"Bash","input":{"command":"ls"}}]`)},
+			{Role: "user", Content: json.RawMessage(`"wait, stop that"`)},
+		},
+	}
+	body := TranslateRequest(req, "", "")
+	msgs := body["messages"].([]map[string]interface{})
+
+	// No message may carry tool_calls (the call a3 has no result).
+	for _, m := range msgs {
+		if tc, ok := m["tool_calls"]; ok && tc != nil {
+			t.Fatalf("dangling tool_use must be downgraded, got tool_calls in %v", m)
+		}
+	}
+	// The assistant turn should now be a text note mentioning the omitted call.
+	var assistantText string
+	for _, m := range msgs {
+		if m["role"] == "assistant" {
+			if s, ok := m["content"].(string); ok {
+				assistantText = s
+			}
+		}
+	}
+	if !strings.Contains(assistantText, "Bash") {
+		t.Errorf("expected a text note about the omitted tool call, got %q", assistantText)
+	}
+}
+
+// TestBuildMessages_PairedToolUseKept: a tool_use WITH a matching tool_result
+// must still produce a real tool_calls entry and a tool message (regression
+// guard — the dangling downgrade must not eat legitimate exchanges).
+func TestBuildMessages_PairedToolUseKept(t *testing.T) {
+	req := &MessageRequest{
+		Model:     "claude-sonnet-4",
+		MaxTokens: 1024,
+		Messages: []MessageParam{
+			{Role: "user", Content: json.RawMessage(`"list files"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_ok","name":"Bash","input":{"command":"ls"}}]`)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_ok","content":"a.go b.go"}]`)},
+		},
+	}
+	body := TranslateRequest(req, "", "")
+	msgs := body["messages"].([]map[string]interface{})
+
+	var sawToolCall, sawToolMsg bool
+	for _, m := range msgs {
+		if m["role"] == "assistant" {
+			if tc, ok := m["tool_calls"].([]interface{}); ok && len(tc) == 1 {
+				sawToolCall = true
+			}
+		}
+		if m["role"] == "tool" && m["tool_call_id"] == "call_ok" {
+			sawToolMsg = true
+		}
+	}
+	if !sawToolCall || !sawToolMsg {
+		t.Errorf("paired exchange must be kept: toolCall=%v toolMsg=%v\n%v", sawToolCall, sawToolMsg, msgs)
+	}
+}
+
+
 func TestTranslateResponse(t *testing.T) {
 	jcResp := map[string]interface{}{
 		"choices": []interface{}{
