@@ -215,12 +215,25 @@ func (s *Server) handleResponsesViaChatStream(w http.ResponseWriter, r *http.Req
 	reads := readChatSSE(r.Context(), resp.Body)
 	heartbeat := time.NewTicker(5 * time.Second)
 	defer heartbeat.Stop()
+	// After [DONE] the upstream may send a trailing usage-only chunk (set via
+	// stream_options.include_usage) before EOF. Wait a short grace window for
+	// it instead of finalizing immediately on [DONE], otherwise the token
+	// stats on response.completed are always 0. If no usage arrives within the
+	// window, finalize with what we have.
+	const doneGracePeriod = 3 * time.Second
+	var doneTimer *time.Timer
+	var doneTimerC <-chan time.Time
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-heartbeat.C:
 			writeSSEHeartbeat(w, flusher)
+		case <-doneTimerC:
+			// Grace window after [DONE] expired without a usage chunk.
+			state.complete()
+			writeSSEDone(w, flusher)
+			return
 		case item, open := <-reads:
 			if !open {
 				if !state.terminal && !state.failed {
@@ -246,13 +259,25 @@ func (s *Server) handleResponsesViaChatStream(w http.ResponseWriter, r *http.Req
 				return
 			}
 			if item.Done {
-				// [DONE] without finish_reason: complete with what we have.
-				state.complete()
-				writeSSEDone(w, flusher)
-				return
+				// [DONE] received: don't finalize yet, wait for a possible
+				// trailing usage chunk within the grace window. If the upstream
+				// closes the stream (EOF) first, the !open branch above
+				// finalizes via state.complete().
+				if doneTimerC == nil {
+					doneTimer = time.NewTimer(doneGracePeriod)
+					doneTimerC = doneTimer.C
+				}
+				continue
 			}
 			if item.InputTokens > 0 || item.OutputTokens > 0 {
 				state.inputTokens, state.outputTokens = item.InputTokens, item.OutputTokens
+				// Trailing usage chunk after [DONE]: finalize now.
+				if doneTimerC != nil {
+					doneTimer.Stop()
+					state.complete()
+					writeSSEDone(w, flusher)
+					return
+				}
 			}
 			if err := state.consumeChunk(item.Data, item.FinishReason); err != nil {
 				state.fail(err.Error(), "upstream_protocol_error")

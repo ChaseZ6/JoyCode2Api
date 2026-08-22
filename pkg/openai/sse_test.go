@@ -51,6 +51,35 @@ func TestReadChatSSE_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestReadChatSSE_UsageAfterDone: with stream_options.include_usage the
+// usage-only chunk arrives AFTER [DONE]. The reader must not stop at [DONE] —
+// it must forward the Done marker and keep reading so the trailing usage chunk
+// is captured (otherwise token stats are always 0).
+func TestReadChatSSE_UsageAfterDone(t *testing.T) {
+	input := `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":34}}
+
+`
+	items := collectChatReads(input)
+	// content, finish, Done marker, trailing usage chunk.
+	if len(items) != 4 {
+		t.Fatalf("items = %d, want 4 (content, finish, Done, usage): %#v", len(items), items)
+	}
+	if !items[2].Done {
+		t.Errorf("third item = %#v, want Done marker", items[2])
+	}
+	usage := items[3]
+	if usage.InputTokens != 120 || usage.OutputTokens != 34 {
+		t.Errorf("trailing usage chunk not captured: %#v", usage)
+	}
+}
+
+
 func TestReadChatSSE_MultilineData(t *testing.T) {
 	input := `data: {"choices":[{"delta":{"content":"hello"},` + "\n" +
 		`data: "finish_reason":null}]}` + "\n\n" +

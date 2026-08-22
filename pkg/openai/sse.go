@@ -74,8 +74,15 @@ func readChatSSE(ctx context.Context, body io.Reader) <-chan chatStreamRead {
 				return
 			}
 			if read.Event.Done {
-				send(chatStreamRead{Done: true})
-				return
+				// Do NOT return here: with stream_options.include_usage the
+				// usage-only chunk arrives AFTER [DONE]. Returning on [DONE]
+				// would drop it and the token stats would always be 0. Forward
+				// the Done marker and keep reading until EOF so the trailing
+				// usage chunk is captured.
+				if !send(chatStreamRead{Done: true}) {
+					return
+				}
+				continue
 			}
 			data := common.UnwrapSSEData(read.Event.Data)
 			if data == "" || !strings.HasPrefix(data, "{") {
