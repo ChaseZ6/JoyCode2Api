@@ -359,8 +359,9 @@ type responsesObject struct {
 			Text string `json:"text"`
 		} `json:"summary"`
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type    string `json:"type"`
+			Text    string `json:"text"`
+			Refusal string `json:"refusal"`
 		} `json:"content"`
 	} `json:"output"`
 	Usage struct {
@@ -399,6 +400,7 @@ func TranslateResponsesToChat(raw map[string]interface{}, model string) (map[str
 	}
 
 	var text, reasoning strings.Builder
+	var refusalText string
 	toolCalls := []map[string]interface{}{}
 	finish := "stop"
 	for _, item := range ro.Output {
@@ -409,8 +411,16 @@ func TranslateResponsesToChat(raw map[string]interface{}, model string) (map[str
 				case "output_text":
 					text.WriteString(c.Text)
 				case "refusal":
-					finish = "content_filter"
-					text.WriteString(c.Text)
+					// A refusal's body lives in the part's `refusal` field, not
+					// `text`. Capture it separately and report finish_reason
+					// "stop" with a `refusal` message field (the chat
+					// convention) rather than content_filter, so clients do not
+					// mistake an ordinary refusal for a safety filter.
+					finish = "stop"
+					refusalText = c.Refusal
+					if refusalText == "" {
+						refusalText = c.Text
+					}
 				}
 			}
 		case "reasoning":
@@ -451,6 +461,9 @@ func TranslateResponsesToChat(raw map[string]interface{}, model string) (map[str
 	message := map[string]interface{}{"role": "assistant", "content": text.String()}
 	if reasoning.Len() > 0 {
 		message["reasoning_content"] = reasoning.String()
+	}
+	if refusalText != "" {
+		message["refusal"] = refusalText
 	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
@@ -540,11 +553,17 @@ func (s *Server) handleResponsesNonStream(w http.ResponseWriter, r *http.Request
 
 // responsesStreamEvent is the subset of Responses SSE payloads we consume.
 type responsesStreamEvent struct {
-	Type      string      `json:"type"`
-	Delta     string      `json:"delta"`
-	ItemID    string      `json:"item_id"`
-	OutputIdx int         `json:"output_index"`
-	Error     interface{} `json:"error"`
+	Type   string `json:"type"`
+	Delta  string `json:"delta"`
+	// RawDelta is the un-decoded value of the event's "delta" field. Text
+	// events carry a JSON string here (also decoded into Delta); multimodal
+	// events carry a JSON object holding attachments (images/files) that would
+	// otherwise be dropped. Presence (non-nil) distinguishes "field absent"
+	// from "empty string", which a plain string cannot.
+	RawDelta json.RawMessage `json:"-"`
+	ItemID   string          `json:"item_id"`
+	OutputIdx int            `json:"output_index"`
+	Error     interface{}    `json:"error"`
 	Item      struct {
 		ID     string `json:"id"`
 		Type   string `json:"type"`
@@ -629,6 +648,22 @@ func handleChatResponsesEvent(state *chatResponsesStreamState, event *responsesS
 	case "response.created", "response.in_progress", "response.output_item.done", "response.output_text.done", "response.function_call_arguments.done":
 		return nil
 	case "response.output_text.delta":
+		// Forward the delta even when the decoded string is empty: multimodal
+		// outputs (images/files) arrive as a full object on a delta whose text
+		// is "". Dropping on `Delta == ""` would drop the attachment with it.
+		// Skip only when the field was genuinely absent.
+		if event.RawDelta == nil {
+			return nil
+		}
+		if len(event.RawDelta) > 0 && event.RawDelta[0] == '{' {
+			// Attachment object: unmarshal and forward as-is so images/files
+			// reach the chat client.
+			var obj map[string]interface{}
+			if err := json.Unmarshal(event.RawDelta, &obj); err == nil {
+				state.emit(obj, nil)
+			}
+			return nil
+		}
 		if event.Delta != "" {
 			state.emit(map[string]interface{}{"content": event.Delta}, nil)
 		}

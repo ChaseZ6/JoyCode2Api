@@ -40,10 +40,20 @@ type UpstreamError struct {
 }
 
 func (e *UpstreamError) Error() string {
-	if e.Code != "" {
-		return fmt.Sprintf("upstream error %s: %s", e.Code, e.Message)
+	// Include Cause so callers that string-match (e.g. isContextLimitError) see
+	// identifiers like "context_length_exceeded" that only appear in the cause,
+	// not in the gateway's generic outer message ("模型服务调用失败").
+	msg := e.Message
+	if e.Cause != "" && !strings.Contains(msg, e.Cause) {
+		if msg != "" {
+			msg += " "
+		}
+		msg += "(cause: " + e.Cause + ")"
 	}
-	return "upstream error: " + e.Message
+	if e.Code != "" {
+		return fmt.Sprintf("upstream error %s: %s", e.Code, msg)
+	}
+	return "upstream error: " + msg
 }
 
 // DetectBusinessError recognizes JoyCode and Responses error envelopes. A nil

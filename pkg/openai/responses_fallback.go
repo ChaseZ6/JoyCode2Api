@@ -26,6 +26,9 @@ func (s *Server) handleResponsesViaChatNonStream(w http.ResponseWriter, r *http.
 	if s.store != nil {
 		maxRetries = s.store.GetIntSetting("max_retries", 3)
 	}
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
 	var resp map[string]interface{}
 	var err error
 	for attempt := 1; attempt <= maxRetries; attempt++ {

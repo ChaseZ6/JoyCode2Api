@@ -751,8 +751,8 @@ func TestClient_Post_SendsCorrectHeaders(t *testing.T) {
 			t.Errorf("Content-Type = %q, want %q", ct, "application/json; charset=UTF-8")
 		}
 		ae := r.Header.Get("Accept-Encoding")
-		if ae != "gzip, deflate" {
-			t.Errorf("Accept-Encoding = %q, want %q", ae, "gzip, deflate")
+		if ae != "gzip" {
+			t.Errorf("Accept-Encoding = %q, want %q", ae, "gzip")
 		}
 		ua := r.Header.Get("User-Agent")
 		if ua != UserAgent {

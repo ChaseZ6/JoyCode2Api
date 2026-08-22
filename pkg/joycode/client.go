@@ -207,7 +207,7 @@ func (c *Client) headers() http.Header {
 		"loginType":       {loginType},
 		"User-Agent":      {UserAgent},
 		"Accept":          {"*/*"},
-		"Accept-Encoding": {"gzip, deflate"},
+		"Accept-Encoding": {"gzip"},
 		"Accept-Language": {"zh-CN,zh;q=0.9,en;q=0.8"},
 	}
 }
@@ -228,7 +228,7 @@ func (c *Client) anthropicHeaders() http.Header {
 		"loginType":       {loginType},
 		"User-Agent":      {UserAgent},
 		"Accept":          {"*/*"},
-		"Accept-Encoding": {"gzip, deflate"},
+		"Accept-Encoding": {"gzip"},
 		"Accept-Language": {"zh-CN,zh;q=0.9,en;q=0.8"},
 	}
 }

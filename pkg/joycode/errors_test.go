@@ -3,6 +3,7 @@ package joycode
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -72,3 +73,28 @@ func TestHTTPErrorPreservesStatusAndRetryAfter(t *testing.T) {
 		t.Errorf("Error() = %q", err.Error())
 	}
 }
+
+// TestUpstreamErrorIncludesCause: the structured cause (e.g.
+// context_length_exceeded) must appear in Error() so callers that string-match
+// for context-limit keywords can detect it even when the outer message is a
+// generic gateway phrase like "模型服务调用失败".
+func TestUpstreamErrorIncludesCause(t *testing.T) {
+	err := DetectBusinessError(map[string]interface{}{
+		"error": map[string]interface{}{
+			"code": float64(400), "message": "模型服务调用失败",
+			"cause": `{"error":{"code":"context_length_exceeded"}}`,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); !strings.Contains(got, "context_length_exceeded") {
+		t.Errorf("Error() = %q, must surface cause identifier", got)
+	}
+	// A cause already present in the message must not be duplicated.
+	dup := (&UpstreamError{Code: "1", Message: "x context_length_exceeded", Cause: "context_length_exceeded"}).Error()
+	if n := strings.Count(dup, "context_length_exceeded"); n != 1 {
+		t.Errorf("duplicated cause in Error() = %q (x%d)", dup, n)
+	}
+}
+

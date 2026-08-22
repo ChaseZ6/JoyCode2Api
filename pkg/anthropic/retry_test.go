@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
 
 func TestConnectStreamWithRetryStopsAfterGateway504(t *testing.T) {
@@ -54,6 +55,40 @@ func TestConnectStreamWithRetryStopsWhenRequestCanceled(t *testing.T) {
 	}
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("upstream calls = %d, want 0 for an already-canceled request", got)
+	}
+}
+
+func TestConnectStreamWithRetryStillAttemptsWhenSettingIsZero(t *testing.T) {
+	var calls atomic.Int32
+	client := joycode.NewClient("pt-test", "user-test")
+	client.SetHTTPClient(&http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")),
+		}, nil
+	})})
+	s, err := store.Open(t.TempDir() + "/retry.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetSetting("max_retries", "0"); err != nil {
+		t.Fatalf("set max_retries: %v", err)
+	}
+	h := NewHandler(client, s)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+
+	resp, err := h.connectStreamWithRetry(req, map[string]interface{}{"stream": true}, client)
+	if err != nil {
+		t.Fatalf("connectStreamWithRetry error = %v", err)
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1 even when max_retries is 0", got)
 	}
 }
 

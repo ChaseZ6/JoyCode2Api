@@ -280,6 +280,13 @@ func readResponsesSSE(ctx context.Context, body io.Reader) <-chan responseStream
 				send(responseStreamRead{Err: fmt.Errorf("invalid Responses stream event: %w", err)})
 				return
 			}
+			// Preserve the raw delta so multimodal attachment objects (which are
+			// not plain strings) survive the trip to the chat bridge.
+			if rd, ok := raw["delta"]; ok {
+				if b, mErr := json.Marshal(rd); mErr == nil {
+					event.RawDelta = b
+				}
+			}
 			if !send(responseStreamRead{Event: &event}) {
 				return
 			}

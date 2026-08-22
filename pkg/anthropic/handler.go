@@ -182,10 +182,7 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 
 	jcBody := TranslateRequest(req, store.GetAccountDefaultModel(r), systemDefault)
 	logRequestDetails(r, "translated request (non-stream)", jcBody)
-	maxRetries := 3
-	if h.store != nil {
-		maxRetries = h.store.GetIntSetting("max_retries", 3)
-	}
+	maxRetries := maxRetriesOrDefault(h.store)
 	var jcResp map[string]interface{}
 	var lastErr error
 
@@ -409,6 +406,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		ID        string
 		Name      string
 		Arguments string
+		// ArgsSent tracks how much of Arguments has been streamed to the
+		// client; we stream incrementally as deltas arrive.
+		ArgsSent int
+		// BlockIndex is assigned when the block is emitted; -1 = not yet.
+		BlockIndex int
 	}
 	toolCalls := make(map[int]*toolCallAccum)
 	currentBlockIndex := 0
@@ -430,13 +432,22 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		openBlock = -1
 		currentBlockIndex++
 	}
-	// Tool blocks are emitted sequentially at finish time in sorted tool
-	// index order: each block gets a content_block_start, one input_json_delta
-	// holding the full accumulated arguments JSON, and a content_block_stop.
-	emitToolBlock := func(tc *toolCallAccum) {
+	// activeTool is the tool whose block is currently open and streaming.
+	// Only one tool block may be open at a time (Anthropic protocol requires
+	// sequential blocks). Args stream incrementally as deltas arrive.
+	var activeTool *toolCallAccum
+	openToolBlock := func(tc *toolCallAccum) {
 		closeOpenBlock()
 		openIsText = false
+		// Repair adjacent-object boundaries ({...}{...}) on whatever has
+		// accumulated so far. This is the only safe repair point: ArgsSent is
+		// still 0 here, so rewriting the buffer cannot invalidate a stream
+		// offset. Any boundary that arrives after the block opens is logged
+		// (the "}{" diagnostic below) rather than repaired mid-stream.
+		tc.Arguments = repairJsonBoundaries(tc.Arguments)
+		tc.BlockIndex = currentBlockIndex
 		openBlock = currentBlockIndex
+		activeTool = tc
 		tcID := tc.ID
 		if tcID == "" {
 			tcID = "toolu_" + newID()
@@ -452,19 +463,43 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 				Input: json.RawMessage("{}"),
 			},
 		})
-		args := tc.Arguments
-		if args == "" || !json.Valid([]byte(args)) {
-			// Upstream truncated the arguments mid-stream (e.g. finish_reason
-			// length): degrade to an empty object so clients don't try to
-			// parse partial JSON.
-			args = "{}"
+		flusher.Flush()
+	}
+	// streamToolArgs sends any un-sent argument prefix for tc. The caller
+	// guarantees tc's block is the open one.
+	//
+	// It must NOT repair the buffer here: once a tool is streaming (ArgsSent
+	// may be > 0), rewriting tc.Arguments would change its length and silently
+	// invalidate the ArgsSent offset into it, emitting a suffix sliced from the
+	// wrong position — corrupt JSON. Repair happens only in openToolBlock,
+	// before anything has been sent.
+	streamToolArgs := func(tc *toolCallAccum) {
+		if tc.BlockIndex < 0 {
+			return
 		}
+		if tc.ArgsSent >= len(tc.Arguments) {
+			return
+		}
+		argsDelta := tc.Arguments[tc.ArgsSent:]
+		tc.ArgsSent = len(tc.Arguments)
+		// Count streamed tool-argument bytes toward the output estimate so a
+		// tool-heavy turn (whose text may be empty) is not reported as ~0 tokens.
+		totalOutput += len(argsDelta)
 		FormatSSE(w, "content_block_delta", sseContentBlockDelta{
 			Type:  "content_block_delta",
-			Index: currentBlockIndex,
-			Delta: deltaText{Type: "input_json_delta", PartialJSON: args},
+			Index: tc.BlockIndex,
+			Delta: deltaText{Type: "input_json_delta", PartialJSON: argsDelta},
 		})
+		flusher.Flush()
+	}
+	// emitToolBlock emits a complete buffered tool block at finish time for
+	// tools that never got to stream (interleaved behind the active one).
+	// openToolBlock repairs their accumulated arguments before streaming.
+	emitToolBlock := func(tc *toolCallAccum) {
+		openToolBlock(tc)
+		streamToolArgs(tc)
 		closeOpenBlock()
+		activeTool = nil
 	}
 	openTextBlock := func() {
 		openIsText = true
@@ -477,11 +512,73 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 		flusher.Flush()
 	}
 
+	// Text buffering: Kimi and some other upstreams emit tiny fragments
+	// (sometimes single CJK characters) per SSE event. Clients that render
+	// each text_delta as a discrete block end up with one word per line.
+	// We buffer small fragments and flush them when we have a reasonable
+	// amount of text or when other events force us to flush.
+	const minTextFlushLen = 12
+	const maxTextFlushLen = 64
+	var pendingText strings.Builder
+	// thinkFilter strips <think>...</think> reasoning across flush boundaries.
+	// Unlike a per-buffer stripThinkTags, it holds back a trailing partial tag
+	// prefix so an opener/closer split across two flushes never leaks to the
+	// client. Its state spans the whole stream.
+	var thinkFilter thinkStripper
+
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	chunkCount := 0
 	var streamInTk, streamOutTk int
 	finishReasonSeen := false
+	// parseFailures counts unparseable SSE lines so we can surface a
+	// diagnostic without spamming the log for every chunk.
+	parseFailures := 0
+
+	flushText := func(force bool) {
+		if pendingText.Len() == 0 {
+			// Even with no new text, a forced flush must drain any visible text
+			// the think filter was holding back across a tag boundary.
+			if force {
+				if held := thinkFilter.Flush(); held != "" {
+					if openBlock < 0 || !openIsText {
+						closeOpenBlock()
+						openTextBlock()
+					}
+					totalOutput += len(held)
+					FormatSSE(w, "content_block_delta", sseContentBlockDelta{
+						Type:  "content_block_delta",
+						Index: openBlock,
+						Delta: deltaText{Type: "text_delta", Text: held},
+					})
+					flusher.Flush()
+				}
+			}
+			return
+		}
+		if !force && pendingText.Len() < minTextFlushLen {
+			return
+		}
+		text := thinkFilter.Feed(pendingText.String())
+		pendingText.Reset()
+		if force {
+			text += thinkFilter.Flush()
+		}
+		if text == "" {
+			return
+		}
+		if openBlock < 0 || !openIsText {
+			closeOpenBlock()
+			openTextBlock()
+		}
+		totalOutput += len(text)
+		FormatSSE(w, "content_block_delta", sseContentBlockDelta{
+			Type:  "content_block_delta",
+			Index: openBlock,
+			Delta: deltaText{Type: "text_delta", Text: text},
+		})
+		flusher.Flush()
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -491,6 +588,15 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			if chunk != nil && chunk.Usage != nil {
 				streamInTk = chunk.Usage.PromptTokens
 				streamOutTk = chunk.Usage.CompletionTokens
+				continue
+			}
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine != "" && trimmedLine != "[DONE]" {
+				parseFailures++
+				// Rate-limited: log the first failure and then every 500.
+				if parseFailures == 1 || parseFailures%500 == 0 {
+					reqLog(r).Warn("unparseable upstream SSE line", "count", parseFailures, "line", truncate(trimmedLine, 200))
+				}
 			}
 			continue
 		}
@@ -500,40 +606,54 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			streamOutTk = chunk.Usage.CompletionTokens
 		}
 
-		for _, tc := range choice.Delta.ToolCalls {
-			idx := tc.Index
-			if _, exists := toolCalls[idx]; !exists {
-				toolCalls[idx] = &toolCallAccum{
-					ID:   tc.ID,
-					Name: tc.Function.Name,
-				}
-			}
-			if tc.ID != "" {
-				toolCalls[idx].ID = tc.ID
-			}
-			if tc.Function.Name != "" {
-				toolCalls[idx].Name = tc.Function.Name
-			}
-			toolCalls[idx].Arguments += string(tc.Function.Arguments)
-			// Temporary diagnostics for the missing file_path investigation
-			if strings.Contains(string(tc.Function.Arguments), "}{") {
-				reqLog(r).Warn("tool arguments chunk contains json boundary", "index", idx, "name", toolCalls[idx].Name, "chunk", tc.Function.Arguments)
+		text := choice.Delta.Content
+		if text != "" {
+			pendingText.WriteString(text)
+			// Text in the same chunk must be buffered before any tool block.
+			if activeTool == nil && len(toolCalls) == 0 && pendingText.Len() >= minTextFlushLen {
+				flushText(pendingText.Len() >= maxTextFlushLen ||
+					strings.ContainsAny(text, "。！？.!?;；\n"))
 			}
 		}
 
-		text := choice.Delta.Content
-		if text != "" {
-			if openBlock < 0 || !openIsText {
-				closeOpenBlock()
-				openTextBlock()
+		// Preserve text that arrived before a tool call in the same upstream
+		// chunk. Tool blocks must not be emitted ahead of already-buffered text.
+		if len(choice.Delta.ToolCalls) > 0 && activeTool == nil && len(toolCalls) == 0 {
+			flushText(true)
+		}
+
+		for _, tc := range choice.Delta.ToolCalls {
+			idx := tc.Index
+			accum, exists := toolCalls[idx]
+			if !exists {
+				accum = &toolCallAccum{
+					ID:         tc.ID,
+					Name:       tc.Function.Name,
+					BlockIndex: -1,
+				}
+				toolCalls[idx] = accum
 			}
-			totalOutput += len(text)
-			FormatSSE(w, "content_block_delta", sseContentBlockDelta{
-				Type:  "content_block_delta",
-				Index: openBlock,
-				Delta: deltaText{Type: "text_delta", Text: text},
-			})
-			flusher.Flush()
+			if tc.ID != "" {
+				accum.ID = tc.ID
+			}
+			if tc.Function.Name != "" {
+				accum.Name = tc.Function.Name
+			}
+			accum.Arguments += string(tc.Function.Arguments)
+
+			// Sequential streaming: open the first tool's block immediately.
+			// Subsequent deltas for the SAME tool stream args in real time.
+			// Deltas for a DIFFERENT tool are buffered and emitted at finish.
+			if activeTool == nil && accum.Name != "" {
+				openToolBlock(accum)
+			}
+			if activeTool == accum {
+				streamToolArgs(accum)
+			}
+			// Temporary diagnostics for the missing file_path investigation
+			if strings.Contains(string(tc.Function.Arguments), "}{") {
+				reqLog(r).Warn("tool arguments chunk contains json boundary", "index", idx, "name", accum.Name, "chunk", tc.Function.Arguments)
+			}
 		}
 
 		if choice.FinishReason != nil {
@@ -541,22 +661,35 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 			finishReasonSeen = true
 			reqLog(r).Info("stream completed", "chunks", chunkCount, "reason", fr, "tools", len(toolCalls))
 
-			// Ensure at least one content block exists — Anthropic SDK requires it
-			if openBlock < 0 && currentBlockIndex == 0 && len(toolCalls) == 0 {
-				openTextBlock()
+			// Close the active tool block (if any), then emit fully-buffered
+			// blocks for any tools that were not active (they received deltas
+			// but never got to stream because another tool was active).
+			if activeTool != nil && activeTool.BlockIndex >= 0 {
+				streamToolArgs(activeTool)
 			}
-
-			// Emit buffered tool blocks sequentially in sorted tool index order.
+			closeOpenBlock()
+			activeTool = nil
 			if len(toolCalls) > 0 {
 				toolIndexes := make([]int, 0, len(toolCalls))
 				for idx := range toolCalls {
-					toolIndexes = append(toolIndexes, idx)
+					if toolCalls[idx].BlockIndex < 0 {
+						toolIndexes = append(toolIndexes, idx)
+					}
 				}
 				sort.Ints(toolIndexes)
 				for _, idx := range toolIndexes {
 					emitToolBlock(toolCalls[idx])
 				}
-			} else {
+			}
+			// Any text collected after tool deltas is emitted only after all
+			// tool blocks have been stopped, preserving Anthropic block order.
+			flushText(true)
+			// flushText may have opened a text block; close it so every
+			// started block is stopped before the terminal events.
+			closeOpenBlock()
+			// Ensure at least one content block exists — Anthropic SDK requires it
+			if openBlock < 0 && currentBlockIndex == 0 && len(toolCalls) == 0 {
+				openTextBlock()
 				closeOpenBlock()
 			}
 
@@ -582,12 +715,19 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 				if len(toolCalls) > 0 && fr != "length" {
 					stopReason = "tool_use"
 				}
+				// Prefer the real completion-token count the upstream reported
+				// (captured into streamOutTk from the usage chunk). Fall back to
+				// the bytes/4 estimate only when the upstream sent no usage.
+				outputTokens := streamOutTk
+				if outputTokens <= 0 {
+					outputTokens = totalOutput / 4
+				}
 				FormatSSE(w, "message_delta", sseMessageDelta{
 					Type:  "message_delta",
 					Delta: deltaStop{StopReason: stopReason},
 					Usage: struct {
 						OutputTokens int `json:"output_tokens"`
-					}{OutputTokens: totalOutput / 4},
+					}{OutputTokens: outputTokens},
 				})
 				FormatSSE(w, "message_stop", sseMessageStop{Type: "message_stop"})
 				flusher.Flush()
@@ -603,6 +743,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	// is true the loop already emitted message_stop, so a trailing read error after
 	// a complete answer is ignored.
 	if !finishReasonSeen {
+		flushText(true)
 		closeOpenBlock()
 		if requestContextDone(r, nil) {
 			reqLog(r).Info("stream request canceled before terminal event", "chunks", chunkCount)
@@ -997,10 +1138,7 @@ func (h *Handler) handleNativeAnthropicNonStream(w http.ResponseWriter, r *http.
 }
 
 func (h *Handler) connectNativeAnthropicStreamWithRetry(r *http.Request, body map[string]interface{}, client *joycode.Client) (*http.Response, error) {
-	maxRetries := 3
-	if h.store != nil {
-		maxRetries = h.store.GetIntSetting("max_retries", 3)
-	}
+	maxRetries := maxRetriesOrDefault(h.store)
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if requestContextDone(r, nil) {
@@ -1129,10 +1267,7 @@ func updateNativeAnthropicUsage(payload string, inputTokens, outputTokens *int) 
 // connectStreamWithRetry attempts to connect to upstream with retries.
 // Peeks at the first SSE line to detect errors before returning the response.
 func (h *Handler) connectStreamWithRetry(r *http.Request, jcBody map[string]interface{}, client *joycode.Client) (*http.Response, error) {
-	maxRetries := 3
-	if h.store != nil {
-		maxRetries = h.store.GetIntSetting("max_retries", 3)
-	}
+	maxRetries := maxRetriesOrDefault(h.store)
 	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -1262,6 +1397,7 @@ func isContextLimitError(body string) bool {
 		strings.Contains(lower, "tokens exceeded") ||
 		strings.Contains(lower, "input length") ||
 		strings.Contains(lower, "model_context_window_exceeded") ||
+		strings.Contains(lower, "context_length_exceeded") ||
 		strings.Contains(lower, "prompt length") ||
 		strings.Contains(lower, "max_input_tokens")
 }

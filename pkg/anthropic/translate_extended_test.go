@@ -280,6 +280,29 @@ func TestTranslateResponse_NormalText(t *testing.T) {
 	}
 }
 
+func TestTranslateResponse_ContentBlocks(t *testing.T) {
+	jcResp := map[string]interface{}{
+		"choices": []interface{}{
+			map[string]interface{}{
+				"message": map[string]interface{}{
+					"content": []interface{}{
+						map[string]interface{}{"type": "text", "text": "第一段"},
+						map[string]interface{}{"type": "output_text", "text": "第二段"},
+						map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,x"}},
+					},
+				},
+			},
+		},
+	}
+	resp := TranslateResponse(jcResp, "Kimi-K3")
+	if len(resp.Content) != 1 || resp.Content[0].Type != "text" {
+		t.Fatalf("Content = %#v, want one text block", resp.Content)
+	}
+	if resp.Content[0].Text != "第一段\n第二段" {
+		t.Fatalf("Text = %q, want joined text blocks", resp.Content[0].Text)
+	}
+}
+
 func TestTranslateResponse_ToolUse(t *testing.T) {
 	// Case 14: Tool use response with stop_reason="tool_use".
 	jcResp := map[string]interface{}{

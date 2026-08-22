@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -95,6 +96,21 @@ func ClaudeNativeEnabled(s *store.Store) bool {
 		return false
 	}
 	return s.GetSetting("enable_claude") == "true"
+}
+
+// maxRetriesOrDefault clamps invalid max_retries settings (0, negative, or
+// unparsable values) to at least one upstream attempt. A setting of 0 used to
+// skip the retry loop entirely, so requests failed before ever contacting the
+// gateway.
+func maxRetriesOrDefault(s *store.Store) int {
+	maxRetries := 3
+	if s != nil {
+		maxRetries = s.GetIntSetting("max_retries", 3)
+	}
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+	return maxRetries
 }
 
 func IsNativeAnthropicModel(model string) bool {
@@ -266,7 +282,7 @@ func TranslateResponse(jcResp map[string]interface{}, reqModel string) *MessageR
 			tcMap, _ := tc.(map[string]interface{})
 			fn, _ := tcMap["function"].(map[string]interface{})
 			name, _ := fn["name"].(string)
-			argsStr, _ := joycode.NormalizeToolArguments(fn["arguments"])
+			argsStr := repairJsonBoundaries(normalizeToolArgsFromValue(fn["arguments"]))
 			id, _ := tcMap["id"].(string)
 			if id == "" {
 				id = "toolu_" + newID()
@@ -284,8 +300,7 @@ func TranslateResponse(jcResp map[string]interface{}, reqModel string) *MessageR
 			})
 		}
 	} else {
-		text, _ := msg["content"].(string)
-		content = append(content, ContentBlock{Type: "text", Text: text})
+		content = append(content, ContentBlock{Type: "text", Text: stripThinkTags(extractMessageText(msg["content"]))})
 	}
 
 	return &MessageResponse{
@@ -643,6 +658,235 @@ func NewToolUseID() string {
 	return "toolu_" + newID()
 }
 
+// streamArguments accepts both the protocol's usual JSON string and
+// gateways that stream object fragments directly. Unlike ToolArguments,
+// it does NOT require object fragments to be valid complete JSON: partial
+// objects (e.g. `{"command": "ls"` followed by `}` in a later chunk) are
+// kept verbatim so argument chunks can be accumulated as text by the
+// caller. Requiring json.Valid here caused entire SSE chunks to be
+// dropped when upstream fragmented arguments as objects, which made
+// Claude Code see empty tool inputs ("required parameter missing").
+type streamArguments string
+
+func (a *streamArguments) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*a = ""
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return err
+		}
+		*a = streamArguments(s)
+		return nil
+	}
+	// Object or partial object: pass through verbatim. Fragments are
+	// accumulated and re-validated by the caller at emit time.
+	*a = streamArguments(trimmed)
+	return nil
+}
+
+// stripThinkTags removes Kimi/DeepSeek-style <think>...</think> blocks
+// from assistant text. This content is the upstream model's internal
+// reasoning; Anthropic clients would otherwise render it as ordinary
+// text (including the raw <think> tags).
+//
+// stripThinkTags is only correct on a complete document. The streaming path
+// instead uses thinkStripper, which holds back a trailing partial tag prefix
+// so a "<think>" split across two flushes is still recognized.
+func stripThinkTags(s string) string {
+	var b strings.Builder
+	for {
+		start := strings.Index(s, "<think>")
+		if start < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:start])
+		s = s[start+len("<think>"):]
+		end := strings.Index(s, "</think>")
+		if end < 0 {
+			break // unterminated: drop remainder
+		}
+		s = s[end+len("</think>"):]
+	}
+	return b.String()
+}
+
+// thinkStripper is a stateful streaming <think> filter. Feed it successive
+// text fragments; it returns the text that is safe to emit now, retaining any
+// trailing partial "<think" prefix and any not-yet-closed think body so a tag
+// split across fragments is never leaked to the client. Call flush at end of
+// stream to force out any remaining visible text.
+type thinkStripper struct {
+	inThink bool
+	// hold buffers text we cannot emit yet: a partial tag prefix, or the body
+	// of an unterminated <think> block.
+	hold strings.Builder
+}
+
+// thinkOpen / thinkClose are the tag literals we filter.
+const thinkOpen = "<think>"
+const thinkClose = "</think>"
+
+// Feed processes one fragment and returns text safe to emit now.
+func (t *thinkStripper) Feed(s string) string {
+	t.hold.WriteString(s)
+	return t.drain(false)
+}
+
+// Flush forces out any remaining emit-safe text at end of stream. Anything
+// still held (an unterminated think block, or a dangling partial tag) is
+// dropped as internal reasoning.
+func (t *thinkStripper) Flush() string {
+	return t.drain(true)
+}
+
+func (t *thinkStripper) drain(final bool) string {
+	var out strings.Builder
+	for {
+		buf := t.hold.String()
+		if t.inThink {
+			end := strings.Index(buf, thinkClose)
+			if end < 0 {
+				// Whole buffer is think body; keep holding until the closer
+				// arrives. On final flush we drop it.
+				if final {
+					t.hold.Reset()
+					t.inThink = false
+				}
+				break
+			}
+			// Discard the think body up to and including the closer.
+			t.hold.Reset()
+			t.hold.WriteString(buf[end+len(thinkClose):])
+			t.inThink = false
+			continue
+		}
+		start := strings.Index(buf, thinkOpen)
+		if start < 0 {
+			// No complete opener. Emit everything except a trailing prefix of
+			// "<think>" that a later fragment might complete.
+			keep := trailingTagPrefixLen(buf, thinkOpen)
+			emit := buf[:len(buf)-keep]
+			if emit != "" {
+				out.WriteString(emit)
+			}
+			t.hold.Reset()
+			t.hold.WriteString(buf[len(buf)-keep:])
+			if final && keep > 0 {
+				// A dangling partial tag at end of stream is not visible text.
+				t.hold.Reset()
+			}
+			break
+		}
+		// Emit text before the opener, enter the think block.
+		if start > 0 {
+			out.WriteString(buf[:start])
+		}
+		t.hold.Reset()
+		t.hold.WriteString(buf[start+len(thinkOpen):])
+		t.inThink = true
+	}
+	return out.String()
+}
+
+// trailingTagPrefixLen returns the length of the longest suffix of s that is a
+// proper prefix of tag (i.e. could be completed into tag by a later fragment).
+func trailingTagPrefixLen(s, tag string) int {
+	max := len(tag) - 1
+	if max > len(s) {
+		max = len(s)
+	}
+	for l := max; l > 0; l-- {
+		if strings.HasSuffix(s, tag[:l]) {
+			return l
+		}
+	}
+	return 0
+}
+
+// extractMessageText accepts the string and content-block shapes upstream
+// returns for message.content and returns the visible text. Some gateways
+// return multimodal blocks even for text-only replies; a plain string type
+// assertion would silently drop the whole answer.
+func extractMessageText(v interface{}) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	case []interface{}:
+		parts := make([]string, 0, len(value))
+		for _, item := range value {
+			block, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			blockType, _ := block["type"].(string)
+			if blockType != "" && blockType != "text" && blockType != "output_text" {
+				continue
+			}
+			if text, ok := block["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+// repairJsonBoundaries repairs arguments text that contains adjacent top-level
+// JSON values (e.g. `{"a":1}{"b":2}`) — a sign that a gateway merged multiple
+// argument fragments. Only the last complete value is kept, matching how
+// OpenAI/Anthropic clients use incremental deltas. A JSON decoder is used so
+// `}{` inside a string value is not mistaken for a boundary.
+func repairJsonBoundaries(args string) string {
+	if json.Valid([]byte(args)) {
+		return args
+	}
+	decoder := json.NewDecoder(strings.NewReader(args))
+	var last json.RawMessage
+	for {
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			break
+		}
+		last = value
+	}
+	if len(last) > 0 && !json.Valid(last) {
+		return args
+	}
+	if len(last) > 0 {
+		return string(last)
+	}
+	return args
+}
+
+// normalizeToolArgsFromValue accepts the object/string shapes upstream sends
+// for tool arguments and returns the string form (or "" when unusable).
+func normalizeToolArgsFromValue(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case map[string]interface{}:
+		b, err := json.Marshal(val)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	case []interface{}:
+		b, err := json.Marshal(val)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	default:
+		return ""
+	}
+}
+
 // StreamChunk represents a parsed SSE chunk from JoyCode.
 type StreamChunk struct {
 	Choices []struct {
@@ -653,8 +897,8 @@ type StreamChunk struct {
 				Index    int    `json:"index"`
 				Type     string `json:"type"`
 				Function struct {
-					Name      string                `json:"name"`
-					Arguments joycode.ToolArguments `json:"arguments"`
+					Name      string          `json:"name"`
+					Arguments streamArguments `json:"arguments"`
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"delta"`

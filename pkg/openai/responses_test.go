@@ -321,6 +321,70 @@ func TestHandleChatResponsesEvent_Failed(t *testing.T) {
 	}
 }
 
+// TestHandleChatResponsesEvent_MultimodalDeltaNotDropped: a multimodal output
+// (image/file) arrives as a delta OBJECT, and its decoded text string is "".
+// Dropping on empty text would drop the attachment. The object must be
+// forwarded so the chat client receives the image.
+func TestHandleChatResponsesEvent_MultimodalDeltaNotDropped(t *testing.T) {
+	rec := httptest.NewRecorder()
+	state := newChatResponsesStreamState(rec, rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), "GPT-5.6 Sol", false)
+	event := responsesStreamEvent{
+		Type:     "response.output_text.delta",
+		Delta:    "", // decoded string is empty for an attachment object
+		RawDelta: json.RawMessage(`{"content":"","images":[{"url":"data:image/png;base64,x"}]}`),
+	}
+	if err := handleChatResponsesEvent(state, &event); err != nil {
+		t.Fatal(err)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "images") || !strings.Contains(out, "data:image/png") {
+		t.Errorf("multimodal attachment dropped, output:\n%s", out)
+	}
+}
+
+// TestHandleChatResponsesEvent_AbsentDeltaSkipped: an event with no delta field
+// at all must not emit anything (RawDelta nil is the absent marker).
+func TestHandleChatResponsesEvent_AbsentDeltaSkipped(t *testing.T) {
+	rec := httptest.NewRecorder()
+	state := newChatResponsesStreamState(rec, rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), "GPT-5.6 Sol", false)
+	event := responsesStreamEvent{Type: "response.output_text.delta"}
+	if err := handleChatResponsesEvent(state, &event); err != nil {
+		t.Fatal(err)
+	}
+	if out := rec.Body.String(); strings.Contains(out, "chat.completion.chunk") {
+		t.Errorf("absent delta must not emit a chunk:\n%s", out)
+	}
+}
+
+// TestTranslateResponsesToChat_Refusal: a refusal carries its body in the
+// part's `refusal` field (not `text`), and must map to finish_reason "stop"
+// with a `refusal` message field — not content_filter — so clients do not
+// mistake an ordinary refusal for a safety filter.
+func TestTranslateResponsesToChat_Refusal(t *testing.T) {
+	raw := map[string]interface{}{
+		"status": "completed",
+		"output": []interface{}{map[string]interface{}{
+			"type": "message",
+			"content": []interface{}{map[string]interface{}{
+				"type": "refusal", "refusal": "I cannot help with that.",
+			}},
+		}},
+	}
+	out, _, _, err := TranslateResponsesToChat(raw, "GPT-5.6 Sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice := out["choices"].([]map[string]interface{})[0]
+	if choice["finish_reason"] != "stop" {
+		t.Errorf("finish_reason = %v, want stop (not content_filter)", choice["finish_reason"])
+	}
+	msg := choice["message"].(map[string]interface{})
+	if msg["refusal"] != "I cannot help with that." {
+		t.Errorf("refusal body = %v, want the refusal text", msg["refusal"])
+	}
+}
+
+
 func TestConnectUpstreamStream_FastFailureUsesHTTPError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
