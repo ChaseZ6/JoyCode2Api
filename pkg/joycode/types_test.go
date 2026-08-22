@@ -59,6 +59,14 @@ func TestContextWindowTokens(t *testing.T) {
 			want: 1_000_000,
 		},
 		{
+			name: "Kimi-K3 limited by gateway 5MB cap, not model",
+			m: ModelInfo{
+				Label: "Kimi-K3", ChatAPIModel: "Kimi-K3",
+				MaxTotalTokens: 200_000,
+			},
+			want: 600_000,
+		},
+		{
 			name: "other model keeps upstream value",
 			m: ModelInfo{
 				Label: "Claude-Opus-4.8", MaxTotalTokens: 200_000,

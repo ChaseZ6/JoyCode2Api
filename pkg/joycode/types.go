@@ -76,10 +76,23 @@ func (m ModelInfo) DisplayName() string {
 // uses roughly one million input tokens. Keep this override model-specific:
 // the same 200K value is reported for many unrelated models whose real limits
 // have not been measured.
+//
+// Kimi-K3 (upstream kimi-k3-large2): needle-in-a-haystack probes confirm the
+// model itself attends to 510K+ prompt tokens, but the Color gateway rejects
+// any request body over 5242880 bytes with
+// {"code":"1","echo":"content length exceeded 5242880 bytes"}. That 5MB cap —
+// not the model — is the effective ceiling (~770K tokens of English filler at
+// the measured 6.8 bytes/token; ~450K CJK characters). 600K leaves headroom
+// for tool schemas, system prompts, and output, and stays clear of the
+// gateway's flaky HTML error page seen near the cap.
 func (m ModelInfo) ContextWindowTokens() int {
 	if normalizeModelName(m.DisplayName()) == normalizeModelName("GPT-5.6 Sol") ||
 		normalizeModelName(m.APIName()) == normalizeModelName("GPT-5.6 Sol") {
 		return 1_000_000
+	}
+	if normalizeModelName(m.DisplayName()) == normalizeModelName("Kimi-K3") ||
+		normalizeModelName(m.APIName()) == normalizeModelName("Kimi-K3") {
+		return 600_000
 	}
 	if m.MaxTotalTokens > 0 {
 		return m.MaxTotalTokens
