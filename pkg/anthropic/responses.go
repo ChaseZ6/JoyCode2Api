@@ -103,6 +103,26 @@ func responsesInstructions(raw json.RawMessage) string {
 // Tool calls and tool results become top-level function_call /
 // function_call_output items rather than nested content blocks.
 func buildResponsesInput(req *MessageRequest) []map[string]interface{} {
+	// Collect every tool_result call_id up front so a tool_use whose result was
+	// removed by truncation (or interrupted by the user) can be downgraded to
+	// text instead of emitting a function_call with no function_call_output —
+	// a protocol-incomplete sequence Responses implementations may reject.
+	answeredCalls := map[string]bool{}
+	for _, msg := range req.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+		var blocks []contentBlock
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_result" && b.ToolUseID != "" {
+				answeredCalls[b.ToolUseID] = true
+			}
+		}
+	}
+
 	items := make([]map[string]interface{}, 0, len(req.Messages))
 	for _, msg := range req.Messages {
 		// Plain string content is the common case.
@@ -137,16 +157,26 @@ func buildResponsesInput(req *MessageRequest) []map[string]interface{} {
 					})
 				}
 			case "tool_use":
+				args := "{}"
+				if len(b.Input) > 0 {
+					args = string(b.Input)
+				}
+				// A tool_use with no matching tool_result in the retained
+				// conversation would emit a function_call with no output.
+				// Downgrade it to a text note to keep the sequence valid.
+				if !answeredCalls[b.ID] {
+					parts = append(parts, map[string]interface{}{
+						"type": responsesTextType(msg.Role),
+						"text": "[previous tool call: " + b.Name + "(" + args + ") — result omitted]",
+					})
+					continue
+				}
 				// Flush accumulated text before the call to preserve ordering.
 				if len(parts) > 0 {
 					items = append(items, map[string]interface{}{
 						"role": msg.Role, "content": parts,
 					})
 					parts = nil
-				}
-				args := "{}"
-				if len(b.Input) > 0 {
-					args = string(b.Input)
 				}
 				items = append(items, map[string]interface{}{
 					"type":      "function_call",

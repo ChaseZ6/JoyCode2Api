@@ -122,6 +122,46 @@ func TestTranslateAnthropicToResponses_ToolRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBuildResponsesInput_DanglingFunctionCallDowngraded: a tool_use with no
+// matching tool_result would emit a function_call with no function_call_output
+// — a sequence strict Responses implementations reject. It must be downgraded
+// to a text note instead.
+func TestBuildResponsesInput_DanglingFunctionCallDowngraded(t *testing.T) {
+	req := &MessageRequest{
+		Model:     "GPT-5.6 Sol",
+		MaxTokens: 64,
+		Messages: []MessageParam{
+			{Role: "user", Content: json.RawMessage(`"start"`)},
+			// Assistant calls a tool; the user interrupted before the result.
+			{Role: "assistant", Content: json.RawMessage(
+				`[{"type":"tool_use","id":"call_dangling","name":"Bash","input":{"command":"ls"}}]`)},
+			{Role: "user", Content: json.RawMessage(`"wait, stop that"`)},
+		},
+	}
+	body := TranslateAnthropicToResponses(req, solModel())
+	input := body["input"].([]map[string]interface{})
+
+	for _, item := range input {
+		if item["type"] == "function_call" {
+			t.Fatalf("dangling function_call must be downgraded, got: %v", input)
+		}
+	}
+	// The omitted call should surface as a text note mentioning the tool name.
+	var sawNote bool
+	for _, item := range input {
+		if content, ok := item["content"].([]map[string]interface{}); ok {
+			for _, p := range content {
+				if s, ok := p["text"].(string); ok && strings.Contains(s, "Bash") {
+					sawNote = true
+				}
+			}
+		}
+	}
+	if !sawNote {
+		t.Errorf("expected a text note about the omitted call, got %v", input)
+	}
+}
+
 // Anthropic server-side builtins have no Responses equivalent and must be dropped
 // rather than sent as malformed function tools.
 func TestConvertToolsToResponses_DropsBuiltins(t *testing.T) {
