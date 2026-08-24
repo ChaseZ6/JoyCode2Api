@@ -126,6 +126,8 @@ const AccountDetail: React.FC = () => {
   const logRequestSeq = useRef(0);
   const logPageRef = useRef(1);
   const [activeSessions, setActiveSessions] = useState(0);
+  const [activeSessionsAutoRefresh, setActiveSessionsAutoRefresh] = useState(true);
+  const [statsAutoRefresh, setStatsAutoRefresh] = useState(true);
   const [statsCollapsed, setStatsCollapsed] = useState(true);
 
   const decodedKey = userId ? decodeURIComponent(userId) : '';
@@ -246,7 +248,7 @@ const AccountDetail: React.FC = () => {
 
   // Keep the summary current without replacing the detail snapshot.
   useEffect(() => {
-    if (!stats) return;
+    if (!stats || !statsAutoRefresh) return;
     const pollSummary = async () => {
       try {
         await fetchStats(true);
@@ -257,7 +259,7 @@ const AccountDetail: React.FC = () => {
     const id = setInterval(pollSummary, 5000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [decodedKey, stats]);
+  }, [decodedKey, statsAutoRefresh, stats]);
 
   const handleStatsToggle = async () => {
     if (!statsCollapsed) {
@@ -274,6 +276,7 @@ const AccountDetail: React.FC = () => {
 
   // Poll active sessions every 5s
   useEffect(() => {
+    if (!activeSessionsAutoRefresh) return;
     const poll = async () => {
       try {
         const accounts = await api.listAccounts();
@@ -284,7 +287,7 @@ const AccountDetail: React.FC = () => {
     poll();
     const id = setInterval(poll, 5000);
     return () => clearInterval(id);
-  }, [decodedKey]);
+  }, [decodedKey, activeSessionsAutoRefresh]);
 
   const handleModelChange = async (newModel: string) => {
     setSavingModel(true);
@@ -515,9 +518,19 @@ const AccountDetail: React.FC = () => {
           {activeSessions > 0 && (
             <Tag color="blue">请求处理中</Tag>
           )}
-          <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 'auto' }}>
-            每 5 秒自动刷新
-          </Typography.Text>
+          <div style={{ marginLeft: 'auto' }}>
+            <Tooltip title="开启后每 5 秒自动刷新实时状态">
+              <Segmented
+                size="small"
+                value={activeSessionsAutoRefresh ? 'on' : 'off'}
+                onChange={(v) => setActiveSessionsAutoRefresh(v === 'on')}
+                options={[
+                  { label: '自动刷新 开', value: 'on' },
+                  { label: '自动刷新 关', value: 'off' },
+                ]}
+              />
+            </Tooltip>
+          </div>
         </div>
       </Card>
 
@@ -543,6 +556,19 @@ const AccountDetail: React.FC = () => {
               <Typography.Text strong style={{ fontSize: 15 }}>
                 {fmtTokens(((statsSummary ?? stats).all_time?.total_input_tokens ?? 0) + ((statsSummary ?? stats).all_time?.total_output_tokens ?? 0))}
               </Typography.Text>
+            </div>
+            <div onClick={(event) => event.stopPropagation()}>
+              <Tooltip title="开启后每 5 秒自动刷新今日 Token 与累计 Token，展开详情时刷新完整统计">
+                <Segmented
+                  size="small"
+                  value={statsAutoRefresh ? 'on' : 'off'}
+                  onChange={(v) => setStatsAutoRefresh(v === 'on')}
+                  options={[
+                    { label: '自动刷新 开', value: 'on' },
+                    { label: '自动刷新 关', value: 'off' },
+                  ]}
+                />
+              </Tooltip>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
