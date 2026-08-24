@@ -121,7 +121,9 @@ const AccountDetail: React.FC = () => {
   const [logPageSize, setLogPageSize] = useState(20);
   const [logTotal, setLogTotal] = useState(0);
   const [logLoading, setLogLoading] = useState(false);
+  const [logAutoRefresh, setLogAutoRefresh] = useState(true);
   const logRequestSeq = useRef(0);
+  const logPageRef = useRef(1);
   const [activeSessions, setActiveSessions] = useState(0);
   const [statsCollapsed, setStatsCollapsed] = useState(true);
 
@@ -156,9 +158,9 @@ const AccountDetail: React.FC = () => {
     }
   };
 
-  const fetchLogs = async () => {
+  const fetchLogs = async (silent = false) => {
     const requestSeq = ++logRequestSeq.current;
-    setLogLoading(true);
+    if (!silent) setLogLoading(true);
     try {
       const data = await api.getAccountLogs(decodedKey, {
         limit: logPageSize, offset: (logPage - 1) * logPageSize, kind: logFilter,
@@ -168,11 +170,11 @@ const AccountDetail: React.FC = () => {
       setLogs(data.logs || []);
       setLogTotal(data.total);
     } catch (e: unknown) {
-      if (requestSeq === logRequestSeq.current) {
+      if (!silent && requestSeq === logRequestSeq.current) {
         message.error(e instanceof Error ? e.message : '请求日志加载失败');
       }
     } finally {
-      if (requestSeq === logRequestSeq.current) setLogLoading(false);
+      if (!silent && requestSeq === logRequestSeq.current) setLogLoading(false);
     }
   };
 
@@ -195,6 +197,19 @@ const AccountDetail: React.FC = () => {
   useEffect(() => { fetchData(); }, [decodedKey]);
   useEffect(() => { fetchModels(); }, [decodedKey]);
   useEffect(() => { fetchLogs(); }, [decodedKey, logPage, logPageSize, logFilter, logSearch]);
+  useEffect(() => { logPageRef.current = logPage; }, [logPage]);
+
+  // Poll the first log page while auto-refresh is on. Silent polling keeps the
+  // table stable, and skipping pages beyond the first avoids shuffling rows
+  // out from under someone reading older entries.
+  useEffect(() => {
+    if (!logAutoRefresh) return;
+    const id = setInterval(() => {
+      if (logPageRef.current === 1) fetchLogs(true);
+    }, 5000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logAutoRefresh, decodedKey, logPageSize, logFilter, logSearch]);
 
   // Daily aggregates use the local calendar day. Refresh only the stats just
   // after local midnight so an open page resets without reloading 500 log rows.
@@ -787,6 +802,17 @@ const AccountDetail: React.FC = () => {
               { label: '错误', value: 'error' },
             ]}
           />
+          <Tooltip title={logPage > 1 ? '自动刷新仅作用于第 1 页，查看历史页时不会打扰' : '开启后每 5 秒自动获取最新请求日志'}>
+            <Segmented
+              size="small"
+              value={logAutoRefresh ? 'on' : 'off'}
+              onChange={(v) => setLogAutoRefresh(v === 'on')}
+              options={[
+                { label: '自动刷新 开', value: 'on' },
+                { label: '自动刷新 关', value: 'off' },
+              ]}
+            />
+          </Tooltip>
         </div>
         <Table
           dataSource={logs}
