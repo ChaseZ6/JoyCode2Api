@@ -109,6 +109,7 @@ const AccountDetail: React.FC = () => {
   const navigate = useNavigate();
   const [account, setAccount] = useState<Account | null>(null);
   const [stats, setStats] = useState<AccountStats | null>(null);
+  const [statsSummary, setStatsSummary] = useState<AccountStats | null>(null);
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -129,16 +130,21 @@ const AccountDetail: React.FC = () => {
 
   const decodedKey = userId ? decodeURIComponent(userId) : '';
 
+  const fetchStats = async (summaryOnly = false) => {
+    const nextStats = await api.getAccountStats(decodedKey);
+    setStatsSummary(nextStats);
+    if (!summaryOnly) setStats(nextStats);
+  };
+
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [accounts, statsData] = await Promise.all([
+      const [accounts] = await Promise.all([
         api.listAccounts(),
-        api.getAccountStats(decodedKey),
       ]);
       const acc = accounts.find((a) => a.user_id === decodedKey);
       setAccount(acc || null);
-      setStats(statsData);
+      await fetchStats();
     } catch (e: unknown) {
       message.error(e instanceof Error ? e.message : '加载失败');
     } finally {
@@ -223,8 +229,7 @@ const AccountDetail: React.FC = () => {
       nextMidnight.setHours(24, 0, 1, 0);
       timer = setTimeout(async () => {
         try {
-          const nextStats = await api.getAccountStats(decodedKey);
-          if (!cancelled) setStats(nextStats);
+          await fetchStats();
         } catch {
           // A manual refresh remains available if the midnight request fails.
         }
@@ -238,6 +243,34 @@ const AccountDetail: React.FC = () => {
       clearTimeout(timer);
     };
   }, [decodedKey]);
+
+  // Keep the summary current without replacing the detail snapshot.
+  useEffect(() => {
+    if (!stats) return;
+    const pollSummary = async () => {
+      try {
+        await fetchStats(true);
+      } catch {
+        // The next interval or opening details will retry the request.
+      }
+    };
+    const id = setInterval(pollSummary, 5000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [decodedKey, stats]);
+
+  const handleStatsToggle = async () => {
+    if (!statsCollapsed) {
+      setStatsCollapsed(true);
+      return;
+    }
+    try {
+      await fetchStats();
+    } catch (e: unknown) {
+      message.error(e instanceof Error ? e.message : '统计详情刷新失败');
+    }
+    setStatsCollapsed(false);
+  };
 
   // Poll active sessions every 5s
   useEffect(() => {
@@ -493,7 +526,7 @@ const AccountDetail: React.FC = () => {
         <Card
           size="small"
           style={{ marginBottom: statsCollapsed ? 20 : 16, cursor: 'pointer' }}
-          onClick={() => setStatsCollapsed(!statsCollapsed)}
+          onClick={handleStatsToggle}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
             <span className="jc-section-title" style={{ margin: 0 }}>
@@ -502,13 +535,13 @@ const AccountDetail: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>今日 Token:</Typography.Text>
               <Typography.Text strong style={{ fontSize: 15, color: CHART_COLORS.secondary }}>
-                {fmtTokens(stats.total_input_tokens + stats.total_output_tokens)}
+                {fmtTokens((statsSummary ?? stats).total_input_tokens + (statsSummary ?? stats).total_output_tokens)}
               </Typography.Text>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>累计 Token:</Typography.Text>
               <Typography.Text strong style={{ fontSize: 15 }}>
-                {fmtTokens((stats.all_time?.total_input_tokens ?? 0) + (stats.all_time?.total_output_tokens ?? 0))}
+                {fmtTokens(((statsSummary ?? stats).all_time?.total_input_tokens ?? 0) + ((statsSummary ?? stats).all_time?.total_output_tokens ?? 0))}
               </Typography.Text>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
