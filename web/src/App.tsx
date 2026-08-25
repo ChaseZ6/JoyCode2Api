@@ -46,15 +46,12 @@ const OAuthCallback: React.FC = () => {
 
 const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [checking, setChecking] = useState(true);
-  const [initialized, setInitialized] = useState(true);
   const [authed, setAuthed] = useState(false);
 
   useEffect(() => {
     authApi.status().then((res) => {
-      setInitialized(res.initialized);
-      if (res.initialized) {
-        setAuthed(isAuthenticated());
-      }
+      // 未设置密码时按免密模式直接放行；已设置密码时才校验本地 token。
+      setAuthed(!res.initialized || isAuthenticated());
       setChecking(false);
     }).catch(() => {
       setChecking(false);
@@ -62,10 +59,6 @@ const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   }, []);
 
   if (checking) return pageLoading;
-
-  if (!initialized) {
-    return <Navigate to="/setup" replace />;
-  }
 
   if (!authed) {
     return <Navigate to="/login" replace />;
