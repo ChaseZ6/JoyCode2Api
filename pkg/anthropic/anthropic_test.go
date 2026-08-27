@@ -192,7 +192,6 @@ func TestBuildMessages_PairedToolUseKept(t *testing.T) {
 	}
 }
 
-
 func TestTranslateResponse(t *testing.T) {
 	jcResp := map[string]interface{}{
 		"choices": []interface{}{
@@ -235,6 +234,42 @@ func TestTranslateResponse(t *testing.T) {
 	}
 	if !strings.HasPrefix(resp.ID, "msg_") {
 		t.Errorf("ID = %q, want msg_ prefix", resp.ID)
+	}
+}
+
+// Regression: an upstream tool_call missing function.name previously produced
+// a tool_use block with an empty name. Claude Code persists that block, then
+// crashes on `s.name.length` every subsequent turn. The converter must
+// substitute a placeholder name instead.
+func TestTranslateResponse_ToolCallMissingName(t *testing.T) {
+	jcResp := map[string]interface{}{
+		"choices": []interface{}{
+			map[string]interface{}{
+				"message": map[string]interface{}{
+					"tool_calls": []interface{}{
+						map[string]interface{}{
+							"id": "toolu_abc",
+							"function": map[string]interface{}{
+								"arguments": `{"command":"cat SITE_GUIDE.md"}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	resp := TranslateResponse(jcResp, "claude-sonnet-4-20250514")
+	if resp.StopReason == nil || *resp.StopReason != "tool_use" {
+		t.Fatalf("StopReason = %v, want tool_use", resp.StopReason)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Type != "tool_use" {
+		t.Fatalf("Content = %+v, want one tool_use block", resp.Content)
+	}
+	if resp.Content[0].Name == "" {
+		t.Fatalf("tool_use name must never be empty: %+v", resp.Content[0])
+	}
+	if resp.Content[0].Name != fallbackToolName {
+		t.Errorf("name = %q, want fallback %q", resp.Content[0].Name, fallbackToolName)
 	}
 }
 

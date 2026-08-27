@@ -358,3 +358,49 @@ func TestThinkStripper_LessThanNotTag(t *testing.T) {
 		t.Fatalf("literal < = %q, want %q", got, "compare a < b and c")
 	}
 }
+
+// Regression: a parallel tool whose first chunk never carries function.name
+// used to be emitted as a tool_use block with an empty name. Claude Code
+// persists that block, then crashes on `s.name.length` every subsequent turn.
+// The stream must substitute a placeholder name instead of emitting an empty
+// one.
+func TestStream_ToolCallMissingNameGetsFallback(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c0\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"\"}}]}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"cat SITE_GUIDE.md\\\"\"}}]}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"}\"}}]}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+	out := runStream(t, bodyOf(sse))
+	events := parseSSE(t, out)
+	checkBlockInvariants(t, events)
+
+	names := []string{}
+	for _, e := range events {
+		if e.Event != "content_block_start" {
+			continue
+		}
+		cb, ok := e.Data["content_block"].(map[string]interface{})
+		if !ok || cb["type"] != "tool_use" {
+			continue
+		}
+		name, _ := cb["name"].(string)
+		names = append(names, name)
+	}
+	if len(names) != 2 {
+		t.Fatalf("expected 2 tool_use blocks, got names %v:\n%s", names, out)
+	}
+	for _, name := range names {
+		if name == "" {
+			t.Fatalf("tool_use emitted with empty name — this bricks Claude Code sessions:\n%s", out)
+		}
+	}
+	found := false
+	for _, name := range names {
+		if name == fallbackToolName {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected one block to use fallback name %q, got %v", fallbackToolName, names)
+	}
+}

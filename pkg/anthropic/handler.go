@@ -444,6 +444,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 	openToolBlock := func(tc *toolCallAccum) {
 		closeOpenBlock()
 		openIsText = false
+		// If the upstream never named the tool (observed from Kimi on parallel
+		// tool calls), emitting a tool_use with an empty name bricks Anthropic
+		// clients — Claude Code persists the block then crashes on `s.name.length`
+		// every subsequent turn. Substitute a placeholder so the turn stays valid.
+		tc.Name = toolNameOrFallback(tc.Name, func(msg string, args ...interface{}) {
+			reqLog(r).Warn(msg, args...)
+		})
 		// Repair adjacent-object boundaries ({...}{...}) on whatever has
 		// accumulated so far. This is the only safe repair point: ArgsSent is
 		// still 0 here, so rewriting the buffer cannot invalidate a stream

@@ -282,6 +282,7 @@ func TranslateResponse(jcResp map[string]interface{}, reqModel string) *MessageR
 			tcMap, _ := tc.(map[string]interface{})
 			fn, _ := tcMap["function"].(map[string]interface{})
 			name, _ := fn["name"].(string)
+			name = toolNameOrFallback(name, nil)
 			argsStr := repairJsonBoundaries(normalizeToolArgsFromValue(fn["arguments"]))
 			id, _ := tcMap["id"].(string)
 			if id == "" {
@@ -889,6 +890,24 @@ func repairJsonBoundaries(args string) string {
 		return string(last)
 	}
 	return args
+}
+
+// fallbackToolName guards against upstream tool_calls that arrive without a
+// function name (observed from Kimi on parallel tool calls). Emitting a
+// tool_use block with an empty name corrupts Anthropic clients: Claude Code
+// persists the block and later crashes on `s.name.length` every turn. A
+// harmless placeholder name keeps the turn valid — the client reports "no
+// such tool" for that call and continues, instead of bricking the session.
+const fallbackToolName = "unknown_tool"
+
+func toolNameOrFallback(name string, logWarn func(msg string, args ...interface{})) string {
+	if name != "" {
+		return name
+	}
+	if logWarn != nil {
+		logWarn("upstream tool_call missing function name, substituting fallback")
+	}
+	return fallbackToolName
 }
 
 // normalizeToolArgsFromValue accepts the object/string shapes upstream sends
