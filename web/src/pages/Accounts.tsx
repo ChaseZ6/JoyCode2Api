@@ -37,6 +37,7 @@ import { writeClipboardText } from '../utils/clipboard';
 
 const BUILTIN_MODELS = [
   { label: 'JoyAI-Code（推荐）', value: 'JoyAI-Code' },
+  { label: 'GPT-6 Astra', value: 'gpt-6-astra' },
   { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
   { label: 'GLM-5.1', value: 'GLM-5.1' },
   { label: 'GLM-5', value: 'GLM-5' },

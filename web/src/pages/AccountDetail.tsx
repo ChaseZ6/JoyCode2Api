@@ -25,6 +25,7 @@ import { writeClipboardText } from '../utils/clipboard';
 // /api/accounts/:id/models, which reflects what the account can actually use.
 const BUILTIN_MODELS = [
   { label: 'JoyAI-Code-1.5（推荐）', value: 'JoyAI-Code-1.5' },
+  { label: 'GPT-6 Astra', value: 'gpt-6-astra' },
 ];
 
 const isClaudeModel = (model?: string) => !!model && /^claude/i.test(model);

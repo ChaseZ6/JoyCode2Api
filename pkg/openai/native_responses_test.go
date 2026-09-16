@@ -19,6 +19,60 @@ func seedNativeResponsesRegistry(t *testing.T, models []joycode.ModelInfo) {
 	t.Cleanup(func() { joycode.DefaultRegistry.Seed(joycode.StaticModels()) })
 }
 
+func gptAstraModel() joycode.ModelInfo {
+	return joycode.ModelInfo{
+		Label: "GPT-6 Astra", ChatAPIModel: "gpt-6-astra",
+		ExtJSON: map[string]interface{}{"adapterType": joycode.AdapterOpenAIResponse},
+	}
+}
+
+type astraRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f astraRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestNativeResponses_GPT6AstraPreservesToolsAndReasoning(t *testing.T) {
+	seedNativeResponsesRegistry(t, []joycode.ModelInfo{gptAstraModel()})
+	var upstreamBody map[string]interface{}
+	client := joycode.NewClient("test-key", "test-user")
+	client.SetTransport(astraRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		decoder := json.NewDecoder(r.Body)
+		decoder.UseNumber()
+		if err := decoder.Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"resp_astra","object":"response","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}`)),
+			Request: r,
+		}, nil
+	}))
+
+	server := NewServer(client, nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"GPT-6 Astra","input":"hello","reasoning":{"effort":"low"},"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamBody["model"] != "gpt-6-astra" {
+		t.Errorf("model=%v, want gpt-6-astra", upstreamBody["model"])
+	}
+	reasoning, ok := upstreamBody["reasoning"].(map[string]interface{})
+	if !ok || reasoning["effort"] != "low" {
+		t.Errorf("reasoning=%v, want preserved low effort", upstreamBody["reasoning"])
+	}
+	tools, ok := upstreamBody["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Errorf("tools=%v, want one preserved function tool", upstreamBody["tools"])
+	}
+}
+
 func TestNativeResponses_NonStream(t *testing.T) {
 	seedNativeResponsesRegistry(t, []joycode.ModelInfo{gptSolModel()})
 	var upstreamBody map[string]interface{}

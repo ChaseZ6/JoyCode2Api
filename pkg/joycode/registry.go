@@ -280,6 +280,11 @@ func StaticModels() []ModelInfo {
 		{Label: "GLM-5-jcloud", ChatAPIModel: "GLM-5-jcloud", MaxTotalTokens: 200000, RespMaxTokens: 64000},
 		{Label: "DeepSeek-V4-Pro", ChatAPIModel: "DeepSeek-V4-Pro", MaxTotalTokens: 200000, RespMaxTokens: 64000},
 		{Label: "Doubao-Seed-2.0-pro", ChatAPIModel: "Doubao-Seed-2.0-pro", MaxTotalTokens: 200000, RespMaxTokens: 64000},
+		// Keep token limits unset here until upstream reports them. ModelInfo's
+		// conservative fallbacks avoid inventing Astra-specific limits while the
+		// live registry remains the source of truth in normal operation.
+		{Label: "GPT-6 Astra", ChatAPIModel: "gpt-6-astra",
+			ExtJSON: map[string]interface{}{"adapterType": AdapterOpenAIResponse}},
 		{Label: "GPT-5.6 Sol", ChatAPIModel: "GPT-5.6 Sol", MaxTotalTokens: 1_000_000, RespMaxTokens: 64000,
 			ExtJSON: map[string]interface{}{"adapterType": AdapterOpenAIResponse}},
 		{Label: "Claude-Opus-4.8", ChatAPIModel: "Claude-Opus-4.8-hq", MaxTotalTokens: 200000, RespMaxTokens: 64000,

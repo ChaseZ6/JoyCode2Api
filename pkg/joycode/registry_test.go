@@ -12,6 +12,8 @@ func testModels() []ModelInfo {
 		{Label: "JoyAI-Code-1.5", ChatAPIModel: "JoyAI-Code-1.5"},
 		{Label: "GLM-5.2", ChatAPIModel: "GLM-5.2"},
 		{Label: "GLM-5", ChatAPIModel: "GLM-5"},
+		{Label: "GPT-6 Astra", ChatAPIModel: "gpt-6-astra",
+			ExtJSON: map[string]interface{}{"adapterType": AdapterOpenAIResponse}},
 		{Label: "GPT-5.6 Sol", ChatAPIModel: "GPT-5.6 Sol",
 			ExtJSON: map[string]interface{}{"adapterType": AdapterOpenAIResponse}},
 		{Label: "Claude-Opus-4.7", ChatAPIModel: "Claude-Opus-4.7-hq", SortOrder: 50,
@@ -64,6 +66,25 @@ func TestRegistry_ResolveNormalisesSpacesAndCase(t *testing.T) {
 		}
 		if m.APIName() != "GPT-5.6 Sol" {
 			t.Errorf("Resolve(%q).APIName() = %q, want %q", name, m.APIName(), "GPT-5.6 Sol")
+		}
+	}
+}
+
+func TestRegistry_ResolveGPT6AstraOfficialID(t *testing.T) {
+	r := NewRegistry(time.Minute)
+	r.Seed(testModels())
+
+	for _, name := range []string{"GPT-6 Astra", "gpt-6-astra", "GPT-6_Astra"} {
+		m, ok := r.Resolve(name)
+		if !ok {
+			t.Errorf("expected %q to resolve", name)
+			continue
+		}
+		if m.APIName() != "gpt-6-astra" {
+			t.Errorf("Resolve(%q).APIName() = %q, want %q", name, m.APIName(), "gpt-6-astra")
+		}
+		if m.Adapter() != AdapterOpenAIResponse {
+			t.Errorf("Resolve(%q).Adapter() = %q, want %q", name, m.Adapter(), AdapterOpenAIResponse)
 		}
 	}
 }
@@ -152,13 +173,26 @@ func TestRegistry_FallsBackToStaticWithoutFetcher(t *testing.T) {
 	if len(r.Models()) == 0 {
 		t.Fatal("expected static fallback rather than an empty list")
 	}
-	// GPT-5.6 Sol must be reachable offline too, with the right adapter.
-	m, ok := r.Resolve("GPT-5.6 Sol")
-	if !ok {
-		t.Fatal("expected GPT-5.6 Sol in the static fallback list")
-	}
-	if m.Adapter() != AdapterOpenAIResponse {
-		t.Errorf("adapter = %q, want %q", m.Adapter(), AdapterOpenAIResponse)
+	// Responses-native GPT models must be reachable offline too, with the
+	// right adapter and upstream identifier.
+	for _, tc := range []struct {
+		requested string
+		apiName   string
+	}{
+		{requested: "GPT-5.6 Sol", apiName: "GPT-5.6 Sol"},
+		{requested: "gpt-6-astra", apiName: "gpt-6-astra"},
+	} {
+		m, ok := r.Resolve(tc.requested)
+		if !ok {
+			t.Errorf("expected %s in the static fallback list", tc.requested)
+			continue
+		}
+		if m.APIName() != tc.apiName {
+			t.Errorf("%s APIName() = %q, want %q", tc.requested, m.APIName(), tc.apiName)
+		}
+		if m.Adapter() != AdapterOpenAIResponse {
+			t.Errorf("%s adapter = %q, want %q", tc.requested, m.Adapter(), AdapterOpenAIResponse)
+		}
 	}
 }
 
