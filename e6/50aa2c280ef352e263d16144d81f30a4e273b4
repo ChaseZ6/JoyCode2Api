@@ -1,0 +1,57 @@
+web/src/pages/Accounts.tsx
+  s_bd5438d066c3b3::t_4510ad344c3f29 334,347
+cmd/JoyCode2Api/static/index.html
+  s_bd5438d066c3b3::t_610903e052859e 8
+web/src/api.ts
+  s_bd5438d066c3b3::t_4510ad344c3f29 50,82
+pkg/store/store_test.go
+  s_bd5438d066c3b3::t_4510ad344c3f29 592-593
+cmd/JoyCode2Api/static/assets/AccountDetail-CdcZk5a5.js
+  s_bd5438d066c3b3::t_610903e052859e 1-2
+pkg/dashboard/handler.go
+  s_bd5438d066c3b3::t_e6b6990701a31e 1404-1408,1425
+web/src/pages/Dashboard.tsx
+  s_bd5438d066c3b3::t_4510ad344c3f29 121,196,215-216,219-220,291,301,345,519
+cmd/JoyCode2Api/serve.go
+  s_bd5438d066c3b3::t_e6b6990701a31e 190
+pkg/store/store.go
+  s_bd5438d066c3b3::t_ac7c5e4b8a1c39 1226-1229,1233,1235,1246,1347
+  s_bd5438d066c3b3::t_e6b6990701a31e 128,137,736-737,744-745,1225,1230-1232,1234,1236-1237,1244,1253,1262-1263,1290-1292,1348-1350,1352,1398-1400,1456,1458-1459,1484,1486-1487,1513-1519,1521-1522,1525,1528,1530,1532
+pkg/store/log_window.go
+  s_bd5438d066c3b3::t_e6b6990701a31e 1-16
+pkg/store/log_window_test.go
+  s_bd5438d066c3b3::t_6932d3cd327a93 80-90
+  s_bd5438d066c3b3::t_ac7c5e4b8a1c39 1-79,91-154
+cmd/JoyCode2Api/static/assets/Dashboard-Dsn3cmsu.js
+  s_bd5438d066c3b3::t_610903e052859e 1
+cmd/JoyCode2Api/static/assets/index-AmEnSIpx.js
+  s_bd5438d066c3b3::t_610903e052859e 1-2
+cmd/JoyCode2Api/static/assets/Settings-BW-_WMin.js
+  s_bd5438d066c3b3::t_610903e052859e 1
+cmd/JoyCode2Api/static/assets/Accounts-DXsf6wEH.js
+  s_bd5438d066c3b3::t_610903e052859e 1-10
+web/src/pages/AccountDetail.tsx
+  s_bd5438d066c3b3::t_4510ad344c3f29 556,558,562,598,667-668,832
+pkg/dashboard/handler_test.go
+  s_bd5438d066c3b3::t_8cc31d1f5cb412 304-307,326-329,450-452
+web/src/pages/Settings.tsx
+  s_bd5438d066c3b3::t_4510ad344c3f29 279-284
+README.md
+  s_bd5438d066c3b3::t_4510ad344c3f29 214
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "e650aa2c280ef352e263d16144d81f30a4e273b4",
+  "prompts": {},
+  "sessions": {
+    "s_bd5438d066c3b3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12df9-4ea2-7472-9596-4d469da1eb05",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "zhouchunxu1 <zhouchunxu1@jd.com>"
+    }
+  }
+}
