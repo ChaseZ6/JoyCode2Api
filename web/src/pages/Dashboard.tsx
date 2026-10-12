@@ -118,7 +118,7 @@ const Dashboard: React.FC = () => {
   const streamRate = stats.total_requests > 0
     ? Math.round((stats.stream_count / stats.total_requests) * 100) : 0;
   const totalTokens = stats.total_input_tokens + stats.total_output_tokens;
-  const allTimeTokens = (stats.all_time?.total_input_tokens ?? 0) + (stats.all_time?.total_output_tokens ?? 0);
+  const monthTokens = (stats.month_to_date?.total_input_tokens ?? 0) + (stats.month_to_date?.total_output_tokens ?? 0);
   const avgTokensPerReq = stats.total_requests > 0
     ? Math.round(totalTokens / stats.total_requests) : 0;
   const avgLatency = Math.round(stats.avg_latency_ms);
@@ -193,7 +193,7 @@ const Dashboard: React.FC = () => {
       <div className="jc-banner">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 16 }}>
           <div>
-            <div className="jc-banner-sub">JoyCode API 代理服务 · 数据概览</div>
+            <div className="jc-banner-sub">JoyCode API 代理服务 · 本月用量（按服务本地时间）</div>
             <div className="jc-banner-title">系统运行状态</div>
             <Space size={8} style={{ marginTop: 8 }}>
               <Button size="small" icon={<ReloadOutlined spin={refreshing} />} onClick={() => fetchData()} disabled={refreshing}>刷新</Button>
@@ -212,12 +212,12 @@ const Dashboard: React.FC = () => {
               <div className="jc-kpi-value">{fmt(totalTokens)}</div>
             </div>
             <div className="jc-kpi">
-              <div className="jc-kpi-label">累计请求</div>
-              <div className="jc-kpi-value" style={{ fontSize: 20 }}>{(stats.all_time?.total_requests ?? 0).toLocaleString()}</div>
+              <div className="jc-kpi-label">本月请求</div>
+              <div className="jc-kpi-value" style={{ fontSize: 20 }}>{(stats.month_to_date?.total_requests ?? 0).toLocaleString()}</div>
             </div>
             <div className="jc-kpi">
-              <div className="jc-kpi-label">累计 Token</div>
-              <div className="jc-kpi-value" style={{ fontSize: 20 }}>{fmt(allTimeTokens)}</div>
+              <div className="jc-kpi-label">本月 Token</div>
+              <div className="jc-kpi-value" style={{ fontSize: 20 }}>{fmt(monthTokens)}</div>
             </div>
             <div className="jc-kpi">
               <div className="jc-kpi-label">账号数</div>
@@ -288,7 +288,7 @@ const Dashboard: React.FC = () => {
         </Col>
       </Row>
 
-      {/* 统计面板：今日 + 累计 */}
+      {/* 统计面板：今日 + 本月 */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         {/* 请求统计 */}
         <Col xs={24} md={8}>
@@ -298,7 +298,7 @@ const Dashboard: React.FC = () => {
                 <Statistic title="今日请求" value={stats.total_requests} valueStyle={{ fontSize: 20, color: CHART_COLORS.primary }} />
               </Col>
               <Col span={12}>
-                <Statistic title="累计请求" value={stats.all_time?.total_requests ?? 0} valueStyle={{ fontSize: 20 }} />
+                <Statistic title="本月请求" value={stats.month_to_date?.total_requests ?? 0} valueStyle={{ fontSize: 20 }} />
               </Col>
               <Col span={12}>
                 <Statistic
@@ -342,7 +342,7 @@ const Dashboard: React.FC = () => {
                 <Statistic title="今日 Token" value={fmt(totalTokens)} valueStyle={{ fontSize: 20, color: CHART_COLORS.secondary }} />
               </Col>
               <Col span={12}>
-                <Statistic title="累计 Token" value={fmt(allTimeTokens)} valueStyle={{ fontSize: 20 }} />
+                <Statistic title="本月 Token" value={fmt(monthTokens)} valueStyle={{ fontSize: 20 }} />
               </Col>
               <Col span={12}>
                 <Statistic title="今日输入" value={fmt(stats.total_input_tokens)} valueStyle={{ fontSize: 16 }} />
@@ -516,7 +516,7 @@ const Dashboard: React.FC = () => {
       )}
 
       {/* 空状态 */}
-      {stats.total_requests === 0 && (stats.all_time?.total_requests ?? 0) === 0 && (
+      {stats.total_requests === 0 && (stats.month_to_date?.total_requests ?? 0) === 0 && (
         <Card style={{ marginTop: 16 }}>
           <Empty description="暂无请求数据">
             <Typography.Text type="secondary">

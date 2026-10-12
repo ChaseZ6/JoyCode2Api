@@ -94,15 +94,6 @@ const FIELD_GROUPS = [
         type: 'switch' as const,
         tag: '已生效',
       },
-      {
-        key: 'log_retention_days',
-        label: '日志保留天数',
-        tooltip: '请求日志的自动清理周期。超过此天数的日志将每小时自动清理，0 表示永久保留',
-        placeholder: '30',
-        type: 'number' as const,
-        suffix: '天',
-        tag: '已生效',
-      },
     ],
   },
 ];
@@ -285,6 +276,12 @@ const SettingsPage: React.FC = () => {
             style={{ marginBottom: 16 }}
             title={<span className="jc-section-title"><SettingOutlined />{group.title}</span>}
           >
+            {group.title === '日志与监控' && (
+              <p style={{ color: '#94A3B8', marginTop: 0 }}>
+                请求日志和用量统计仅保留本月 1 日 00:00 至今的数据，按服务本地时间计算。
+                每月自动重新累计，服务启动时及每小时清理上月及更早的日志。
+              </p>
+            )}
             <Row gutter={[24, 0]}>
               {group.fields.map((field) => (
                 <Col xs={24} md={12} key={field.key}>

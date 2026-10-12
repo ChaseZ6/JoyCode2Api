@@ -589,8 +589,8 @@ func TestGetAccountStats_UsesCalendarDayAndRollingHourlyWindow(t *testing.T) {
 		t.Errorf("daily endpoints = %#v", endpoints)
 	}
 
-	if stats.AllTime.TotalRequests != 6 || stats.AllTime.TotalInputTk != 300 || stats.AllTime.TotalOutputTk != 30 || stats.AllTime.ErrorCount != 1 {
-		t.Errorf("all-time = %+v, want all six records", stats.AllTime)
+	if stats.MonthToDate.TotalRequests != 4 || stats.MonthToDate.TotalInputTk != 210 || stats.MonthToDate.TotalOutputTk != 21 || stats.MonthToDate.ErrorCount != 1 {
+		t.Errorf("month-to-date = %+v, want four elapsed records", stats.MonthToDate)
 	}
 
 	hourly := map[string]int{}

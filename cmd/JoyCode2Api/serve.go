@@ -187,9 +187,7 @@ var serveCmd = &cobra.Command{
 			ticker := time.NewTicker(1 * time.Hour)
 			defer ticker.Stop()
 			cleanup := func() {
-				if days := s.GetIntSetting("log_retention_days", 30); days > 0 {
-					s.CleanupOldLogs(days)
-				}
+				s.CleanupPreviousMonthLogs()
 			}
 			cleanup()
 			for {

@@ -1401,7 +1401,11 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats.ByAccount = []store.AccountCount{}
 	}
 
-	totals, _ := h.store.GetAllTimeTotals()
+	totals, err := h.store.GetMonthToDateTotals()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	hourly, _ := h.store.GetHourlyStats()
 	if hourly == nil {
 		hourly = []store.HourlyData{}
@@ -1418,7 +1422,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		"success_count":       stats.SuccessCount,
 		"by_model":            stats.ByModel,
 		"by_account":          stats.ByAccount,
-		"all_time":            totals,
+		"month_to_date":       totals,
 		"hourly":              hourly,
 	}
 	writeJSON(w, http.StatusOK, resp)

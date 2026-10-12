@@ -331,7 +331,7 @@ const Accounts: React.FC = () => {
         <div style={{ lineHeight: 1.4 }}>
           <Typography.Text strong style={{ fontSize: 13 }}>{val}</Typography.Text>
           <br />
-          <Typography.Text type="secondary" style={{ fontSize: 11 }}>累计 {record.total_requests}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>本月 {record.total_requests}</Typography.Text>
         </div>
       ),
     },
@@ -344,7 +344,7 @@ const Accounts: React.FC = () => {
         <div style={{ lineHeight: 1.4 }}>
           <Typography.Text strong style={{ fontSize: 13 }}>{fmtTokens(val)}</Typography.Text>
           <br />
-          <Typography.Text type="secondary" style={{ fontSize: 11 }}>累计 {fmtTokens(record.total_tokens)}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>本月 {fmtTokens(record.total_tokens)}</Typography.Text>
         </div>
       ),
     },

@@ -301,6 +301,10 @@ func TestHandleStatsEmpty(t *testing.T) {
 	if m["total_requests"] != float64(0) {
 		t.Errorf("total_requests = %v, want 0", m["total_requests"])
 	}
+	month, ok := m["month_to_date"].(map[string]interface{})
+	if !ok || month["total_requests"] != float64(0) {
+		t.Errorf("empty month-to-date = %v, want zero totals", m["month_to_date"])
+	}
 }
 
 func TestHandleStatsWithLogs(t *testing.T) {
@@ -318,6 +322,10 @@ func TestHandleStatsWithLogs(t *testing.T) {
 	m := decodeJSON(t, w)
 	if m["total_requests"] != float64(1) {
 		t.Errorf("total_requests = %v, want 1", m["total_requests"])
+	}
+	month, ok := m["month_to_date"].(map[string]interface{})
+	if !ok || month["total_requests"] != float64(1) {
+		t.Errorf("month-to-date = %v, want 1 request", m["month_to_date"])
 	}
 }
 
@@ -438,6 +446,10 @@ func TestHandleAccountStats(t *testing.T) {
 	m := decodeJSON(t, w)
 	if m["total_requests"] != float64(2) {
 		t.Errorf("total_requests = %v, want 2", m["total_requests"])
+	}
+	month, ok := m["month_to_date"].(map[string]interface{})
+	if !ok || month["total_requests"] != float64(2) {
+		t.Errorf("account month-to-date = %v, want 2 requests", m["month_to_date"])
 	}
 }
 

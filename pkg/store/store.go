@@ -125,7 +125,7 @@ type AccountStats struct {
 	ByEndpoint    []EndpointCount `json:"by_endpoint"`
 	AvgLatencyMs  float64         `json:"avg_latency_ms"`
 	ErrorCount    int             `json:"error_count"`
-	AllTime       *AllTimeTotals  `json:"all_time"`
+	MonthToDate   *UsageTotals    `json:"month_to_date"`
 	Hourly        []HourlyData    `json:"hourly"`
 }
 
@@ -134,7 +134,7 @@ type EndpointCount struct {
 	Count    int    `json:"count"`
 }
 
-type AllTimeTotals struct {
+type UsageTotals struct {
 	TotalRequests int `json:"total_requests"`
 	TotalInputTk  int `json:"total_input_tokens"`
 	TotalOutputTk int `json:"total_output_tokens"`
@@ -733,15 +733,16 @@ func (s *Store) FillAccountStats(accounts []AccountInfo) {
 		return
 	}
 
-	// Single query with conditional aggregation for both all-time and today.
+	// Single query with conditional aggregation for both this month and today.
+	monthStart, now := monthLogWindow(time.Now())
 	rows, err := s.db.Query(`
 		SELECT api_key,
 			COUNT(*) as total_req,
 			COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens,
 			SUM(CASE WHEN date(created_at) = date('now', 'localtime') THEN 1 ELSE 0 END) as today_req,
 			COALESCE(SUM(CASE WHEN date(created_at) = date('now', 'localtime') THEN input_tokens + output_tokens ELSE 0 END), 0) as today_tokens
-		FROM request_logs
-		GROUP BY api_key`)
+		FROM request_logs WHERE `+monthLogFilter+`
+		GROUP BY api_key`, monthStart, now)
 	if err != nil {
 		slog.Warn("store: fill account stats query failed", "error", err)
 		return
@@ -1221,23 +1222,35 @@ func (s *Store) GetStats() (*Stats, error) {
 	return stats, nil
 }
 
-func (s *Store) GetAllTimeTotals() (*AllTimeTotals, error) {
-	t := &AllTimeTotals{}
+func (s *Store) GetMonthToDateTotals() (*UsageTotals, error) {
+	return s.getMonthToDateTotalsAt(time.Now())
+}
+
+func (s *Store) getMonthToDateTotalsAt(now time.Time, userIDs ...string) (*UsageTotals, error) {
+	monthStart, end := monthLogWindow(now)
+	filter := monthLogFilter
+	args := []interface{}{monthStart, end}
+	if len(userIDs) > 0 {
+		filter += " AND api_key = ?"
+		args = append(args, userIDs[0])
+	}
+	t := &UsageTotals{}
 	err := s.db.QueryRow(`
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0)
-		FROM request_logs`).Scan(&t.TotalRequests, &t.TotalInputTk, &t.TotalOutputTk, &t.ErrorCount)
+		FROM request_logs WHERE `+filter, args...).Scan(&t.TotalRequests, &t.TotalInputTk, &t.TotalOutputTk, &t.ErrorCount)
 	if err != nil {
-		slog.Error("store: get all-time totals failed", "error", err)
+		slog.Error("store: get month-to-date totals failed", "error", err)
 		return nil, err
 	}
 	return t, nil
 }
 
 func (s *Store) GetHourlyStats() ([]HourlyData, error) {
+	monthStart, now := monthLogWindow(time.Now())
 	rows, err := s.db.Query(`
 		SELECT strftime('%m-%d %H', created_at) as hour,
 			COUNT(*) as count,
@@ -1246,7 +1259,8 @@ func (s *Store) GetHourlyStats() ([]HourlyData, error) {
 			SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END)
 		FROM request_logs
 		WHERE created_at >= datetime('now', 'localtime', '-24 hours')
-		GROUP BY hour ORDER BY hour`)
+			AND `+monthLogFilter+`
+		GROUP BY hour ORDER BY hour`, monthStart, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1273,6 +1287,9 @@ func (s *Store) getAccountStatsAt(userID string, now time.Time) (*AccountStats, 
 	dayStart := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, localNow.Location())
 	dayEnd := dayStart.AddDate(0, 0, 1)
 	hourlyStart := localNow.Add(-24 * time.Hour)
+	if start := startOfMonth(localNow); hourlyStart.Before(start) {
+		hourlyStart = start
+	}
 	const timestampLayout = "2006-01-02 15:04:05"
 	todayFilter := "created_at >= ? AND created_at < ?"
 	todayArgs := []interface{}{dayStart.Format(timestampLayout), dayEnd.Format(timestampLayout)}
@@ -1327,15 +1344,12 @@ func (s *Store) getAccountStatsAt(userID string, now time.Time) (*AccountStats, 
 		as.ByEndpoint = append(as.ByEndpoint, ec)
 	}
 
-	// All-time totals are intentionally independent of the daily window.
-	allTime := &AllTimeTotals{}
-	s.db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE api_key = ?", userID).Scan(&allTime.TotalRequests)
-	s.db.QueryRow("SELECT COALESCE(SUM(input_tokens), 0) FROM request_logs WHERE api_key = ?", userID).Scan(&allTime.TotalInputTk)
-	s.db.QueryRow("SELECT COALESCE(SUM(output_tokens), 0) FROM request_logs WHERE api_key = ?", userID).Scan(&allTime.TotalOutputTk)
-	s.db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE api_key = ? AND status_code >= 400", userID).Scan(&allTime.ErrorCount)
-	as.AllTime = allTime
+	as.MonthToDate, err = s.getMonthToDateTotalsAt(localNow, userID)
+	if err != nil {
+		return nil, err
+	}
 
-	// Hourly breakdown remains a rolling 24-hour window.
+	// Keep the rolling 24-hour breakdown within the retained calendar month.
 	hRows, err := s.db.Query(`
 		SELECT strftime('%m-%d %H', created_at) as hour,
 			COUNT(*) as count,
@@ -1381,8 +1395,9 @@ func (s *Store) GetAccountLogsPage(userID string, query LogQuery) ([]RequestLog,
 	if query.Offset < 0 {
 		query.Offset = 0
 	}
-	where := []string{"api_key = ?"}
-	args := []interface{}{userID}
+	monthStart, now := monthLogWindow(time.Now())
+	where := []string{"api_key = ?", monthLogFilter}
+	args := []interface{}{userID, monthStart, now}
 	switch query.Kind {
 	case "", "all":
 	case "stream":
@@ -1438,9 +1453,10 @@ func (s *Store) GetRecentLogs(limit int) ([]RequestLog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
+	monthStart, now := monthLogWindow(time.Now())
 	rows, err := s.db.Query(
-		"SELECT id, api_key, model, endpoint, stream, status_code, latency_ms, COALESCE(error_message, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), created_at FROM request_logs ORDER BY id DESC LIMIT ?",
-		limit,
+		"SELECT id, api_key, model, endpoint, stream, status_code, latency_ms, COALESCE(error_message, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), created_at FROM request_logs WHERE "+monthLogFilter+" ORDER BY id DESC LIMIT ?",
+		monthStart, now, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -1465,9 +1481,10 @@ func (s *Store) GetRecentErrors(limit int) ([]RequestLog, error) {
 	if limit <= 0 {
 		limit = 50
 	}
+	monthStart, now := monthLogWindow(time.Now())
 	rows, err := s.db.Query(
-		"SELECT id, api_key, model, endpoint, stream, status_code, latency_ms, COALESCE(error_message, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), created_at FROM request_logs WHERE status_code >= 400 ORDER BY id DESC LIMIT ?",
-		limit,
+		"SELECT id, api_key, model, endpoint, stream, status_code, latency_ms, COALESCE(error_message, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), created_at FROM request_logs WHERE status_code >= 400 AND "+monthLogFilter+" ORDER BY id DESC LIMIT ?",
+		monthStart, now, limit,
 	)
 	if err != nil {
 		slog.Error("store: get recent errors query failed", "error", err)
@@ -1493,24 +1510,26 @@ func (s *Store) GetRecentErrors(limit int) ([]RequestLog, error) {
 	return logs, nil
 }
 
-// CleanupOldLogs deletes request logs older than the specified number of days.
-func (s *Store) CleanupOldLogs(days int) (int64, error) {
-	if days <= 0 {
-		return 0, nil
-	}
+// CleanupPreviousMonthLogs retains only logs from the current local calendar month.
+func (s *Store) CleanupPreviousMonthLogs() (int64, error) {
+	return s.cleanupPreviousMonthLogsAt(time.Now())
+}
+
+func (s *Store) cleanupPreviousMonthLogsAt(now time.Time) (int64, error) {
+	monthStart, _ := monthLogWindow(now)
 	result, err := s.db.Exec(
-		"DELETE FROM request_logs WHERE created_at < datetime('now', 'localtime', '-' || ? || ' days')",
-		days,
+		"DELETE FROM request_logs WHERE created_at < ?",
+		monthStart,
 	)
 	if err != nil {
-		slog.Error("store: cleanup old logs failed", "days", days, "error", err)
+		slog.Error("store: cleanup previous month logs failed", "before", monthStart, "error", err)
 		return 0, err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
 	if affected > 0 {
-		slog.Info("store: cleaned up old logs", "days", days, "deleted", affected)
+		slog.Info("store: cleaned up previous month logs", "before", monthStart, "deleted", affected)
 	}
-	return affected, nil
+	return affected, err
 }
 
 // MigrateTokenLogs reassigns request_logs stored under api_token values to the account's user_id.

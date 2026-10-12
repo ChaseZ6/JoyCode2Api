@@ -553,13 +553,13 @@ const AccountDetail: React.FC = () => {
               </Typography.Text>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>累计 Token:</Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>本月 Token:</Typography.Text>
               <Typography.Text strong style={{ fontSize: 15 }}>
-                {fmtTokens(((statsSummary ?? stats).all_time?.total_input_tokens ?? 0) + ((statsSummary ?? stats).all_time?.total_output_tokens ?? 0))}
+                {fmtTokens(((statsSummary ?? stats).month_to_date?.total_input_tokens ?? 0) + ((statsSummary ?? stats).month_to_date?.total_output_tokens ?? 0))}
               </Typography.Text>
             </div>
             <div onClick={(event) => event.stopPropagation()}>
-              <Tooltip title="开启后每 5 秒自动刷新今日 Token 与累计 Token，展开详情时刷新完整统计">
+              <Tooltip title="开启后每 5 秒自动刷新今日 Token 与本月 Token，展开详情时刷新完整统计">
                 <Segmented
                   size="small"
                   value={statsAutoRefresh ? 'on' : 'off'}
@@ -595,7 +595,7 @@ const AccountDetail: React.FC = () => {
                   <Statistic title="今日请求" value={stats.total_requests} valueStyle={{ fontSize: 20, color: CHART_COLORS.primary }} prefix={<ApiOutlined />} />
                 </Col>
                 <Col span={12}>
-                  <Statistic title="累计请求" value={stats.all_time?.total_requests ?? 0} valueStyle={{ fontSize: 20 }} />
+                  <Statistic title="本月请求" value={stats.month_to_date?.total_requests ?? 0} valueStyle={{ fontSize: 20 }} />
                 </Col>
                 <Col span={12}>
                   <Statistic
@@ -664,8 +664,8 @@ const AccountDetail: React.FC = () => {
                 </Col>
                 <Col span={12}>
                   <Statistic
-                    title="累计 Token"
-                    value={fmtTokens((stats.all_time?.total_input_tokens ?? 0) + (stats.all_time?.total_output_tokens ?? 0))}
+                    title="本月 Token"
+                    value={fmtTokens((stats.month_to_date?.total_input_tokens ?? 0) + (stats.month_to_date?.total_output_tokens ?? 0))}
                     valueStyle={{ fontSize: 20 }}
                   />
                 </Col>
@@ -829,7 +829,7 @@ const AccountDetail: React.FC = () => {
         title={
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <ClockCircleOutlined style={{ color: '#22C55E' }} />
-            <span>请求日志</span>
+            <span>本月请求日志</span>
             <Tag>{logTotal} 条</Tag>
           </div>
         }
