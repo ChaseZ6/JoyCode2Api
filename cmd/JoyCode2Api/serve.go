@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/anthropic"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/auth"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/dashboard"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
@@ -335,6 +336,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 func requestLogMiddleware(next http.Handler, s *store.Store, writer *store.RequestLogWriter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		websocketUpgrade := common.IsResponsesWebSocketUpgrade(r)
 		r = store.InitTokenUsage(r)
 		r = store.InitModel(r)
 		r = store.InitAccountModel(r)
@@ -391,7 +393,7 @@ func requestLogMiddleware(next http.Handler, s *store.Store, writer *store.Reque
 		}
 
 		// Record session activity for /v1/ proxy requests
-		if isProxyInferencePath(r.URL.Path) && resolvedAccount != nil {
+		if isProxyInferencePath(r.URL.Path) && resolvedAccount != nil && !websocketUpgrade {
 			if sessionID == "" {
 				sessionID = r.RemoteAddr // fallback: unique per client IP
 			}
@@ -400,6 +402,13 @@ func requestLogMiddleware(next http.Handler, s *store.Store, writer *store.Reque
 
 		rw := &responseWriter{ResponseWriter: w, statusCode: 200, bodyLimit: 64 << 10}
 		next.ServeHTTP(rw, r)
+		if websocketUpgrade && rw.statusCode == http.StatusUpgradeRequired {
+			// A rejected transport probe consumed no model tokens. Keep it out
+			// of inference/error statistics, while retaining auth and other errors.
+			slog.Debug("responses websocket upgrade declined; use HTTP",
+				"request_id", reqID, "path", r.URL.Path, "status", rw.statusCode)
+			return
+		}
 
 		// Log /v1/ requests (skip GET /v1/models — it's a lightweight list
 		// endpoint with no model/tokens and would pollute stats with empty rows).

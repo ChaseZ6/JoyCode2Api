@@ -19,6 +19,15 @@ import (
 // CC Switch. The payload is intentionally preserved as a generic JSON object so
 // newer Responses fields pass through without waiting for a proxy release.
 func (s *Server) handleNativeResponses(w http.ResponseWriter, r *http.Request) {
+	if common.IsResponsesWebSocketUpgrade(r) {
+		// Codex treats 426 as a signal to fall back to HTTP without showing the
+		// generic WebSocket failure that a 405 response causes.
+		w.Header().Set("Allow", "POST, OPTIONS")
+		writeOpenAIError(w, http.StatusUpgradeRequired,
+			"Responses WebSocket transport is not supported; use POST /responses with stream=true for SSE streaming",
+			"invalid_request_error", "websocket_not_supported", "")
+		return
+	}
 	if !requirePOST(w, r) {
 		return
 	}

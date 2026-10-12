@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/openai"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
 
@@ -113,6 +114,62 @@ func TestRequestLogMiddleware_RecordsInternalStreamFailure(t *testing.T) {
 	}
 	if log.InputTokens != 0 || log.OutputTokens != 0 {
 		t.Errorf("unexpected usage for truncated stream: %d/%d", log.InputTokens, log.OutputTokens)
+	}
+}
+
+func TestRequestLogMiddleware_WebSocketNegotiation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		path       string
+		upgrade    bool
+		denyAuth   bool
+		wantStatus int
+		wantLogs   int
+	}{
+		{"responses handshake", "/responses", true, false, 426, 0},
+		{"v1 handshake", "/v1/responses", true, false, 426, 0},
+		{"ordinary GET remains an error", "/responses", false, false, 405, 1},
+		{"other endpoint remains an error", "/v1/chat/completions", true, false, 405, 1},
+		{"auth failure remains an error", "/responses", true, true, 401, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := store.Open(t.TempDir() + "/proxy.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			mux := http.NewServeMux()
+			openai.NewServer(nil, nil).RegisterRoutes(mux)
+			var next http.Handler = mux
+			if tc.denyAuth {
+				next = inferenceAuthMiddleware(mux, s, "0.0.0.0")
+			}
+			writer := store.NewRequestLogWriter(s, 16)
+			defer writer.Shutdown(context.Background())
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.upgrade {
+				req.Header.Set("Connection", "keep-alive, Upgrade")
+				req.Header.Set("Upgrade", "websocket")
+			}
+			rec := httptest.NewRecorder()
+			requestLogMiddleware(next, s, writer).ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if err := writer.Shutdown(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			logs, err := s.GetRecentLogs(10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(logs) != tc.wantLogs {
+				t.Fatalf("logs=%d want=%d", len(logs), tc.wantLogs)
+			}
+			if len(logs) == 1 && (logs[0].StatusCode != tc.wantStatus || logs[0].ErrorMessage == "") {
+				t.Errorf("missing real failure: %+v", logs[0])
+			}
+		})
 	}
 }
 

@@ -26,6 +26,61 @@ func gptAstraModel() joycode.ModelInfo {
 	}
 }
 
+func TestNativeResponses_WebSocketFallback(t *testing.T) {
+	server := NewServer(nil, nil)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	for _, path := range []string{"/responses", "/v1/responses"} {
+		for _, tc := range []struct {
+			name       string
+			method     string
+			connection []string
+			upgrade    []string
+			wantStatus int
+		}{
+			{"websocket", http.MethodGet, []string{"Upgrade"}, []string{"websocket"}, 426},
+			{"case and token list", http.MethodGet, []string{"keep-alive, UpGrAdE"}, []string{" WebSocket "}, 426},
+			{"multiple header values", http.MethodGet, []string{"keep-alive", "upgrade"}, []string{"websocket"}, 426},
+			{"ordinary GET", http.MethodGet, nil, nil, 405},
+			{"missing connection", http.MethodGet, nil, []string{"websocket"}, 405},
+			{"missing upgrade", http.MethodGet, []string{"Upgrade"}, nil, 405},
+			{"other protocol", http.MethodGet, []string{"Upgrade"}, []string{"h2c"}, 405},
+			{"partial connection token", http.MethodGet, []string{"not-upgrade"}, []string{"websocket"}, 405},
+			{"POST ignores upgrade headers", http.MethodPost, []string{"Upgrade"}, []string{"websocket"}, 400},
+			{"OPTIONS", http.MethodOptions, []string{"Upgrade"}, []string{"websocket"}, 200},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(tc.method, path, nil)
+				for _, value := range tc.connection {
+					req.Header.Add("Connection", value)
+				}
+				for _, value := range tc.upgrade {
+					req.Header.Add("Upgrade", value)
+				}
+				rec := httptest.NewRecorder()
+				mux.ServeHTTP(rec, req)
+				if rec.Code != tc.wantStatus {
+					t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.wantStatus, rec.Body.String())
+				}
+				if tc.wantStatus == http.StatusUpgradeRequired {
+					if !strings.Contains(rec.Body.String(), `"code":"websocket_not_supported"`) || rec.Header().Get("Allow") != "POST, OPTIONS" {
+						t.Errorf("missing HTTP fallback guidance: headers=%v body=%s", rec.Header(), rec.Body.String())
+					}
+				}
+			})
+		}
+	}
+	// The fallback is deliberately scoped to Responses, not shared POST gates.
+	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("chat status=%d want=405", rec.Code)
+	}
+}
+
 type astraRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f astraRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
