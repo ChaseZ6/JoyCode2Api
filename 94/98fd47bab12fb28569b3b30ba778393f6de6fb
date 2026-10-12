@@ -1,0 +1,27 @@
+pkg/openai/native_responses.go
+  s_4a4df6cdbb26e4::t_a0aad193157fef 22-30
+pkg/common/websocket.go
+  s_4a4df6cdbb26e4::t_a0aad193157fef 1-26
+cmd/JoyCode2Api/serve.go
+  s_4a4df6cdbb26e4::t_a0aad193157fef 26,339,396,405-411
+pkg/openai/native_responses_test.go
+  s_4a4df6cdbb26e4::t_d2b4a4deb0ed34 29-83
+cmd/JoyCode2Api/responses_usage_test.go
+  s_4a4df6cdbb26e4::t_d2b4a4deb0ed34 11,120-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "9498fd47bab12fb28569b3b30ba778393f6de6fb",
+  "prompts": {},
+  "sessions": {
+    "s_4a4df6cdbb26e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12ecd-895d-7f43-8194-b2802430397f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "zhouchunxu1 <zhouchunxu1@jd.com>"
+    }
+  }
+}
