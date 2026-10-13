@@ -305,6 +305,15 @@ func TestHandleStatsEmpty(t *testing.T) {
 	if !ok || month["total_requests"] != float64(0) {
 		t.Errorf("empty month-to-date = %v, want zero totals", m["month_to_date"])
 	}
+	for _, field := range []string{"month_start", "month_end", "as_of"} {
+		value, ok := month[field].(string)
+		if !ok {
+			t.Fatalf("month-to-date %s = %v, want a timestamp with timezone", field, month[field])
+		}
+		if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+			t.Fatalf("month-to-date %s = %q: %v", field, value, err)
+		}
+	}
 }
 
 func TestHandleStatsWithLogs(t *testing.T) {

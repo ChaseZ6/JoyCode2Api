@@ -41,6 +41,17 @@ func TestMonthToDateRetentionBoundaries(t *testing.T) {
 			if *totals != (UsageTotals{TotalRequests: 4, TotalInputTk: 1000, TotalOutputTk: 40, ErrorCount: 1}) {
 				t.Fatalf("global month-to-date = %+v", totals)
 			}
+			summary, err := s.getMonthToDateSummaryAt(now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary.UsageTotals != *totals || !summary.MonthStart.Equal(start) ||
+				!summary.MonthEnd.Equal(start.AddDate(0, 1, 0)) || !summary.AsOf.Equal(now) {
+				t.Fatalf("month summary uses a different usage window: %+v", summary)
+			}
+			if summary.MonthStart.Location() != loc || summary.MonthEnd.Location() != loc || summary.AsOf.Location() != loc {
+				t.Fatalf("month summary lost the service timezone: %+v", summary)
+			}
 			account, err := s.getAccountStatsAt("account", now)
 			if err != nil {
 				t.Fatal(err)

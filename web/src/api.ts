@@ -52,6 +52,9 @@ export interface Stats {
     total_input_tokens: number;
     total_output_tokens: number;
     error_count: number;
+    month_start: string;
+    month_end: string;
+    as_of: string;
   };
   hourly: {
     hour: string;

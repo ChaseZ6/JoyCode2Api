@@ -18,8 +18,9 @@ import {
 } from 'recharts';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api, accountDisplayName } from '../api';
-import type { Account, AccountStats, ModelInfo, RequestLog } from '../api';
+import type { Account, AccountStats, ModelInfo, RequestLog, Stats } from '../api';
 import { writeClipboardText } from '../utils/clipboard';
+import MonthlyBudget from '../components/MonthlyBudget';
 
 // Offline fallback only. The selector is normally populated from
 // /api/accounts/:id/models, which reflects what the account can actually use.
@@ -111,6 +112,7 @@ const AccountDetail: React.FC = () => {
   const [account, setAccount] = useState<Account | null>(null);
   const [stats, setStats] = useState<AccountStats | null>(null);
   const [statsSummary, setStatsSummary] = useState<AccountStats | null>(null);
+  const [monthlyUsage, setMonthlyUsage] = useState<Stats['month_to_date'] | null>(null);
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -134,8 +136,12 @@ const AccountDetail: React.FC = () => {
   const decodedKey = userId ? decodeURIComponent(userId) : '';
 
   const fetchStats = async (summaryOnly = false) => {
-    const nextStats = await api.getAccountStats(decodedKey);
+    const [nextStats, globalStats] = await Promise.all([
+      api.getAccountStats(decodedKey),
+      api.getStats(),
+    ]);
     setStatsSummary(nextStats);
+    setMonthlyUsage(globalStats.month_to_date);
     if (!summaryOnly) setStats(nextStats);
   };
 
@@ -559,7 +565,7 @@ const AccountDetail: React.FC = () => {
               </Typography.Text>
             </div>
             <div onClick={(event) => event.stopPropagation()}>
-              <Tooltip title="开启后每 5 秒自动刷新今日 Token 与本月 Token，展开详情时刷新完整统计">
+              <Tooltip title="开启后每 5 秒自动刷新今日 Token、本月 Token 与月度剩余，展开详情时刷新完整统计">
                 <Segmented
                   size="small"
                   value={statsAutoRefresh ? 'on' : 'off'}
@@ -578,6 +584,7 @@ const AccountDetail: React.FC = () => {
               {statsCollapsed ? <DownOutlined style={{ fontSize: 12, color: '#94A3B8' }} /> : <UpOutlined style={{ fontSize: 12, color: '#94A3B8' }} />}
             </div>
           </div>
+          {monthlyUsage && <MonthlyBudget usage={monthlyUsage} />}
         </Card>
       )}
 

@@ -1401,7 +1401,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats.ByAccount = []store.AccountCount{}
 	}
 
-	totals, err := h.store.GetMonthToDateTotals()
+	totals, err := h.store.GetMonthToDateSummary()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
