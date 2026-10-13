@@ -1,0 +1,37 @@
+web/src/index.css
+  s_49db28b9b02021::t_05d552f0b24ea2 570-591
+pkg/dashboard/handler_test.go
+  s_49db28b9b02021::t_01f8340233a545 308-316
+web/src/components/MonthlyBudget.tsx
+  s_49db28b9b02021::t_2edd86af114dcb 1-59
+web/src/pages/AccountDetail.tsx
+  s_49db28b9b02021::t_2edd86af114dcb 21,23,115,139-142,144,568,587
+pkg/store/log_window.go
+  s_49db28b9b02021::t_05d552f0b24ea2 7-32
+cmd/JoyCode2Api/static/assets/index-BchaSmeZ.css
+  s_49db28b9b02021::t_5c9faa99913b93 1
+cmd/JoyCode2Api/static/index.html
+  s_49db28b9b02021::t_5c9faa99913b93 12
+pkg/store/log_window_test.go
+  s_49db28b9b02021::t_dde81b54a2a421 44-54
+pkg/dashboard/handler.go
+  s_49db28b9b02021::t_05d552f0b24ea2 1404
+web/src/api.ts
+  s_49db28b9b02021::t_05d552f0b24ea2 55-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "57bacda387cc96bf30f03daf761010fd09e08fc6",
+  "prompts": {},
+  "sessions": {
+    "s_49db28b9b02021": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13344-2aaf-7cc3-ae04-a2ab502a4e19",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "zhouchunxu1 <zhouchunxu1@jd.com>"
+    }
+  }
+}
