@@ -1,0 +1,46 @@
+web/src/pages/AccountDetail.tsx
+  s_49db28b9b02021::t_2cacf7c018df0d 4,548-549,551,555,557,559-560,562,565-566
+cmd/JoyCode2Api/static/assets/Dashboard-CEgJ3f2-.js
+  s_49db28b9b02021::t_d30a3f2ff79073 1
+cmd/JoyCode2Api/static/assets/vendor-C78v-T1X.js
+  s_49db28b9b02021::t_a8621c5d225e29 1-3
+cmd/JoyCode2Api/static/assets/index-B5cQAMop.css
+  s_49db28b9b02021::t_d30a3f2ff79073 1
+web/src/components/MonthlyBudget.tsx
+  s_49db28b9b02021::t_2cacf7c018df0d 6,8,22,26-44,54,63
+cmd/JoyCode2Api/static/assets/AccountDetail-D2DKFmTW.js
+  s_49db28b9b02021::t_d30a3f2ff79073 1-2
+cmd/JoyCode2Api/static/assets/antd-CBHfGy7m.js
+  s_49db28b9b02021::t_a8621c5d225e29 1-305
+cmd/JoyCode2Api/static/assets/Settings-CUZp-W_G.js
+  s_49db28b9b02021::t_d30a3f2ff79073 1
+web/src/index.css
+  s_49db28b9b02021::t_08989e806719b4 599
+  s_49db28b9b02021::t_c1d61cab8e531e 575,665
+  s_49db28b9b02021::t_2cacf7c018df0d 570-574,576-579,587,589-598,600-650,655,660-664,666-686
+cmd/JoyCode2Api/static/assets/index-CUm8B6kV.js
+  s_49db28b9b02021::t_d30a3f2ff79073 1-2
+cmd/JoyCode2Api/static/assets/recharts-DhJqNjR0.js
+  s_49db28b9b02021::t_a8621c5d225e29 1-33
+cmd/JoyCode2Api/static/assets/Accounts-C-tdvIoJ.js
+  s_49db28b9b02021::t_d30a3f2ff79073 1-10
+cmd/JoyCode2Api/static/index.html
+  s_49db28b9b02021::t_a8621c5d225e29 10-11
+  s_49db28b9b02021::t_d30a3f2ff79073 8,12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "731b05dbf92696793201fadf7747b61c6c7b1202",
+  "prompts": {},
+  "sessions": {
+    "s_49db28b9b02021": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13344-2aaf-7cc3-ae04-a2ab502a4e19",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "zhouchunxu1 <zhouchunxu1@jd.com>"
+    }
+  }
+}
