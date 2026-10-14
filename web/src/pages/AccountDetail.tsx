@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Card, Row, Col, Statistic, Typography, Skeleton, Tag, Select, Button, Input,
-  message, Space, Table, Badge, Segmented, Popconfirm, Tooltip, Divider,
+  message, Space, Table, Badge, Segmented, Popconfirm, Tooltip, Divider, Checkbox,
 } from 'antd';
 import type { TableColumnsType } from 'antd';
 import {
@@ -545,46 +545,25 @@ const AccountDetail: React.FC = () => {
       {stats && (
         <Card
           size="small"
-          style={{ marginBottom: statsCollapsed ? 20 : 16, cursor: 'pointer' }}
-          onClick={handleStatsToggle}
+          className="jc-stats-summary"
+          style={{ marginBottom: statsCollapsed ? 20 : 16 }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
+          <div className="jc-stats-summary-header">
             <span className="jc-section-title" style={{ margin: 0 }}>
               <FireOutlined />统计信息
             </span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>今日 Token:</Typography.Text>
-              <Typography.Text strong style={{ fontSize: 15, color: CHART_COLORS.secondary }}>
-                {fmtTokens((statsSummary ?? stats).total_input_tokens + (statsSummary ?? stats).total_output_tokens)}
-              </Typography.Text>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>本月 Token:</Typography.Text>
-              <Typography.Text strong style={{ fontSize: 15 }}>
-                {fmtTokens(((statsSummary ?? stats).month_to_date?.total_input_tokens ?? 0) + ((statsSummary ?? stats).month_to_date?.total_output_tokens ?? 0))}
-              </Typography.Text>
-            </div>
-            <div onClick={(event) => event.stopPropagation()}>
+            <div className="jc-stats-summary-actions">
               <Tooltip title="开启后每 5 秒自动刷新今日 Token、本月 Token 与月度剩余，展开详情时刷新完整统计">
-                <Segmented
-                  size="small"
-                  value={statsAutoRefresh ? 'on' : 'off'}
-                  onChange={(v) => setStatsAutoRefresh(v === 'on')}
-                  options={[
-                    { label: '自动刷新 开', value: 'on' },
-                    { label: '自动刷新 关', value: 'off' },
-                  ]}
-                />
+                <Checkbox checked={statsAutoRefresh} onChange={(event) => setStatsAutoRefresh(event.target.checked)}>自动刷新</Checkbox>
               </Tooltip>
-            </div>
-            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              <Button type="text" size="small" onClick={handleStatsToggle} aria-expanded={!statsCollapsed}
+                icon={statsCollapsed ? <DownOutlined /> : <UpOutlined />} iconPlacement="end">
                 {statsCollapsed ? '展开详情' : '收起详情'}
-              </Typography.Text>
-              {statsCollapsed ? <DownOutlined style={{ fontSize: 12, color: '#94A3B8' }} /> : <UpOutlined style={{ fontSize: 12, color: '#94A3B8' }} />}
+              </Button>
             </div>
           </div>
-          {monthlyUsage && <MonthlyBudget usage={monthlyUsage} />}
+          {monthlyUsage && <MonthlyBudget usage={monthlyUsage}
+            todayTokens={(statsSummary ?? stats).total_input_tokens + (statsSummary ?? stats).total_output_tokens} />}
         </Card>
       )}
 

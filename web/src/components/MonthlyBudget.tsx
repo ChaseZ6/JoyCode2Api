@@ -3,9 +3,9 @@ import { Progress, Tag, Typography } from 'antd';
 import type { Stats } from '../api';
 
 const MONTHLY_TOKEN_LIMIT = 1_000_000_000;
-const fmt = (n: number) => `${(n / 1_000_000).toFixed(2)}M`;
+const fmt = (n: number) => (n / 1_000_000).toFixed(2);
 
-const MonthlyBudget: React.FC<{ usage: Stats['month_to_date'] }> = ({ usage }) => {
+const MonthlyBudget: React.FC<{ usage: Stats['month_to_date']; todayTokens: number }> = ({ usage, todayTokens }) => {
   const monthStart = Date.parse(usage.month_start);
   const monthEnd = Date.parse(usage.month_end);
   const asOf = Date.parse(usage.as_of);
@@ -19,17 +19,29 @@ const MonthlyBudget: React.FC<{ usage: Stats['month_to_date'] }> = ({ usage }) =
   const remainingTimePercent = remainingTime / (monthEnd - monthStart) * 100;
   const remainingDays = remainingTime / 86_400_000;
   const overBudget = usedTokens > MONTHLY_TOKEN_LIMIT;
+  const quotaExhausted = usedTokens >= MONTHLY_TOKEN_LIMIT;
   const usageAhead = remainingQuotaPercent < remainingTimePercent;
 
   return (
-    <div style={{ marginTop: 16 }} onClick={(event) => event.stopPropagation()}>
-      <div className="jc-month-budget-title">
-        <Typography.Text strong>
-          {overBudget ? `本月已超额 ${fmt(usedTokens - MONTHLY_TOKEN_LIMIT)}` : `本月剩余 ${fmt(remainingTokens)}`}
-          <Typography.Text type="secondary"> / 1000M · 全部账号</Typography.Text>
-        </Typography.Text>
-        {overBudget ? <Tag color="error">额度已用完</Tag>
-          : usageAhead ? <Tag color="warning">使用偏快</Tag> : null}
+    <div className="jc-month-budget">
+      <div className="jc-month-budget-summary">
+        <div className="jc-month-budget-metrics">
+          <div>
+            <div className="jc-month-budget-caption">今日已用</div>
+            <div className="jc-month-budget-value jc-month-budget-today">{fmt(todayTokens)}<span>M</span></div>
+          </div>
+          <div>
+            <div className="jc-month-budget-caption">{overBudget ? '本月已超额' : '本月剩余'}</div>
+            <div className={`jc-month-budget-value${overBudget ? ' jc-month-budget-over' : ''}`}>
+              {fmt(overBudget ? usedTokens - MONTHLY_TOKEN_LIMIT : remainingTokens)}<span>M</span>
+            </div>
+          </div>
+        </div>
+        <div className="jc-month-budget-meta">
+          <Typography.Text type="secondary">月度上限 1000M · 全部账号</Typography.Text>
+          {quotaExhausted ? <Tag color="error">额度已用完</Tag>
+            : usageAhead ? <Tag color="warning">使用偏快</Tag> : null}
+        </div>
       </div>
       <div className="jc-month-budget-bars">
         <div>
@@ -39,7 +51,7 @@ const MonthlyBudget: React.FC<{ usage: Stats['month_to_date'] }> = ({ usage }) =
           </div>
           <div role="progressbar" aria-label="本月额度剩余" aria-valuenow={remainingQuotaPercent} aria-valuemin={0} aria-valuemax={100}>
             <Progress percent={remainingQuotaPercent} showInfo={false}
-              strokeColor={overBudget ? 'var(--jc-danger)' : usageAhead ? 'var(--jc-warning)' : 'var(--jc-accent)'} />
+              size="small" strokeColor={quotaExhausted ? 'var(--jc-danger)' : usageAhead ? 'var(--jc-warning)' : 'var(--jc-accent)'} />
           </div>
         </div>
         <div>
@@ -48,7 +60,7 @@ const MonthlyBudget: React.FC<{ usage: Stats['month_to_date'] }> = ({ usage }) =
             <Typography.Text className="jc-mono">{remainingTimePercent.toFixed(1)}%</Typography.Text>
           </div>
           <div role="progressbar" aria-label="本月时间剩余" aria-valuenow={remainingTimePercent} aria-valuemin={0} aria-valuemax={100}>
-            <Progress percent={remainingTimePercent} showInfo={false} strokeColor="var(--jc-info)" />
+            <Progress percent={remainingTimePercent} showInfo={false} size="small" strokeColor="var(--jc-info)" />
           </div>
         </div>
       </div>

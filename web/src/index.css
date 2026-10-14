@@ -567,7 +567,16 @@ code, pre, .ant-typography code, .jc-mono {
   color: var(--jc-accent);
 }
 
-.jc-month-budget-title,
+.jc-stats-summary {
+  container-type: inline-size;
+}
+
+.jc-stats-summary .ant-card-body {
+  padding: 24px !important;
+}
+
+.jc-stats-summary-header,
+.jc-stats-summary-actions,
 .jc-month-budget-label {
   display: flex;
   align-items: center;
@@ -575,18 +584,106 @@ code, pre, .ant-typography code, .jc-mono {
   gap: 12px;
 }
 
-.jc-month-budget-title {
+.jc-stats-summary-header {
   flex-wrap: wrap;
-  margin-bottom: 16px;
+}
+
+.jc-stats-summary-actions .ant-checkbox-wrapper,
+.jc-stats-summary-actions .ant-btn {
+  color: var(--jc-fg-muted);
+  font-size: 12px;
+}
+
+.jc-month-budget {
+  display: grid;
+  grid-template-columns: minmax(324px, 480px) minmax(220px, 1fr);
+  align-items: center;
+  gap: 28px;
+  margin-top: 22px;
+}
+
+.jc-month-budget-summary {
+  padding-right: 24px;
+  border-right: 1px solid var(--jc-border-soft);
+}
+
+.jc-month-budget-metrics {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 18px;
+}
+
+.jc-month-budget-caption,
+.jc-month-budget-meta .ant-typography {
+  font-size: 12px;
+  color: var(--jc-fg-muted);
+}
+
+.jc-month-budget-value {
+  margin: 4px 0 8px;
+  font-size: 36px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: -1.1px;
+  font-variant-numeric: tabular-nums;
+}
+
+.jc-month-budget-value span {
+  margin-left: 5px;
+  font-size: 16px;
+  letter-spacing: 0;
+  color: var(--jc-fg-muted);
+}
+
+.jc-month-budget-today {
+  color: var(--jc-accent);
+}
+
+.jc-month-budget-over {
+  color: var(--jc-danger);
+}
+
+.jc-month-budget-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .jc-month-budget-bars {
   display: grid;
-  gap: 12px;
+  gap: 18px;
 }
 
 .jc-month-budget-label {
   margin-bottom: 4px;
+  font-size: 12px;
+}
+
+@container (max-width: 620px) {
+  .jc-stats-summary .ant-card-body {
+    padding: 20px !important;
+  }
+
+  .jc-month-budget {
+    grid-template-columns: 1fr;
+    gap: 22px;
+  }
+
+  .jc-month-budget-summary {
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  .jc-month-budget-value {
+    font-size: 28px;
+  }
+}
+
+@container (max-width: 420px) {
+  .jc-stats-summary-actions {
+    width: 100%;
+  }
 }
 
 .jc-log-toolbar {
